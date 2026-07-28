@@ -1,4 +1,4 @@
-Outsourcing Protocols for Group Multi-Exponentiation Computation
+### Outsourcing Protocols for Group Multi-Exponentiation Computation
 
 This repository contains research prototype implementations of outsourcing
 protocols and algorithms for group multi-exponentiation computation.
