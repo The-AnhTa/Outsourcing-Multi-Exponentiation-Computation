@@ -1,28 +1,273 @@
 #include "vme_ibf/phase2.hpp"
-#include <array>
+
+#include "vme_ibf/group_utils.hpp"
+#include "internal/crypto.hpp"
+#include "internal/protocol.hpp"
+
 #include <stdexcept>
 
 namespace vme_ibf {
 namespace {
-Fr fr_mul(const Fr&a,const Fr&b){Fr z;Fr::mul(z,a,b);return z;}
-GT products(std::initializer_list<GT> xs){GT z;z.setOne();for(const auto&x:xs)z=gt_mul(z,x);return z;}
-void absorb_initial(Transcript&T,size_t d,size_t n,const Fr&q){std::array<Bytes,3>f{encode_u64_be(d),encode_u64_be(n),serialize(q)};T.absorb("VME.BF.G2/VME-INITIAL/V2",f);}
-void absorb_beta(Transcript&T,size_t k,size_t m,const DoryFoldProof&f){std::array<Bytes,6>x{encode_u64_be(k),encode_u64_be(m),serialize(f.D1L),serialize(f.D1R),serialize(f.D2L),serialize(f.D2R)};T.absorb("VME.BF.G2/DORY-BETA-MESSAGE/V2",x);}
-void absorb_alpha(Transcript&T,size_t k,size_t m,const DoryFoldProof&f){std::array<Bytes,4>x{encode_u64_be(k),encode_u64_be(m),serialize(f.W1),serialize(f.W2)};T.absorb("VME.BF.G2/DORY-ALPHA-MESSAGE/V2",x);}
-void absorb_u(Transcript&T,size_t t,size_t h,const GT&u){std::array<Bytes,3>x{encode_u64_be(t),encode_u64_be(h),serialize(u)};T.absorb("VME.BF.G2/BATCH-U/V2",x);}
+
+GT product(std::initializer_list<GT> values) {
+    GT result;
+    result.setOne();
+    for (const GT& value : values) result = gt_mul(result, value);
+    return result;
 }
 
-Phase2Result prove_phase2(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const Phase1Result&p1){
- if(c.d<1||c.n!=(size_t{1}<<c.d)||c.G.size()!=c.n||c.H.size()!=c.n||p1.statement.x.size()!=c.n||p1.r.size()!=c.d||p1.fresh.size()!=c.d+1||p.pairing_x.size()!=c.d+1||p.delta1R.size()!=c.d||p.delta2R.size()!=c.d)throw std::invalid_argument("malformed Phase-II input");
- Phase2Result out;out.proof.dory_folds.reserve(c.d);out.proof.batch_U.reserve(c.d);out.challenges.beta.resize(c.d);out.challenges.alpha.resize(c.d);out.challenges.gamma.resize(c.d+1);out.challenges.gamma[0].clear();out.folded.resize(c.d+1);out.aggregate.resize(c.d+1);
- Transcript T=Transcript::resume(p1.transcript_after_R);auto s=tensor_vector(p1.r);if(s.size()!=c.n)throw std::logic_error("tensor length mismatch");out.q=inner_product(s,p1.statement.x);absorb_initial(T,c.d,c.n,out.q);
- DoryInstanceState agg;agg.witness.Phi.reserve(c.n);agg.witness.Theta.reserve(c.n);for(size_t i=0;i<c.n;++i){agg.witness.Phi.push_back(g1_pow(c.L,p1.statement.x[i]));agg.witness.Theta.push_back(g2_pow(c.Lprime,s[i]));}agg.target.D0=gt_pow(p.pairing_LLprime,out.q);mcl::bn::pairing(agg.target.D1,c.L,p1.statement.X);mcl::bn::pairing(agg.target.D2,p1.R,c.Lprime);out.initial_instance=agg;out.aggregate[0]=agg;
- for(size_t t=1;t<=c.d;++t){size_t k=t-1,m=c.n>>k,h=m/2;if(agg.witness.Phi.size()!=m||agg.witness.Theta.size()!=m)throw std::logic_error("aggregate dimension mismatch");DoryFoldProof fp;auto phi=std::span(agg.witness.Phi);auto theta=std::span(agg.witness.Theta);auto gn=std::span(c.G).first(h);auto ln=std::span(c.H).first(h);fp.D1L=pairing_product(phi.first(h),ln);fp.D1R=pairing_product(phi.subspan(h,h),ln);fp.D2L=pairing_product(gn,theta.first(h));fp.D2R=pairing_product(gn,theta.subspan(h,h));absorb_beta(T,k,m,fp);Fr beta=T.challenge_nonzero("VME.BF.G2/BETA/V2",k),bi=inverse_nonzero(beta);out.challenges.beta[k]=beta;
-  std::vector<G1> pc;std::vector<G2>tc;pc.reserve(m);tc.reserve(m);for(size_t i=0;i<m;++i){pc.push_back(g1_add(agg.witness.Phi[i],g1_pow(c.G[i],beta)));tc.push_back(g2_add(agg.witness.Theta[i],g2_pow(c.H[i],bi)));}fp.W1=pairing_product(std::span(pc).first(h),std::span(tc).subspan(h,h));fp.W2=pairing_product(std::span(pc).subspan(h,h),std::span(tc).first(h));absorb_alpha(T,k,m,fp);Fr alpha=T.challenge_nonzero("VME.BF.G2/ALPHA/V2",k),ai=inverse_nonzero(alpha);out.challenges.alpha[k]=alpha;
-  DoryInstanceState bar;bar.witness.Phi.reserve(h);bar.witness.Theta.reserve(h);for(size_t i=0;i<h;++i){bar.witness.Phi.push_back(g1_add(g1_pow(pc[i],alpha),pc[h+i]));bar.witness.Theta.push_back(g2_add(g2_pow(tc[i],ai),tc[h+i]));}bar.target.D0=products({agg.target.D0,p.pairing_x[k],gt_pow(agg.target.D1,bi),gt_pow(agg.target.D2,beta),gt_pow(fp.W1,alpha),gt_pow(fp.W2,ai)});bar.target.D1=products({gt_pow(fp.D1L,alpha),fp.D1R,gt_pow(p.pairing_x[k+1],fr_mul(alpha,beta)),gt_pow(p.delta1R[k],beta)});bar.target.D2=products({gt_pow(fp.D2L,ai),fp.D2R,gt_pow(p.pairing_x[k+1],fr_mul(ai,bi)),gt_pow(p.delta2R[k],bi)});out.folded[t]=bar;out.proof.dory_folds.push_back(fp);
-  const auto&fresh=p1.fresh[t];if(fresh.Phi.size()!=h||fresh.Theta.size()!=h)throw std::logic_error("fresh dimension mismatch");GT u=gt_mul(pairing_product(bar.witness.Phi,fresh.Theta),pairing_product(fresh.Phi,bar.witness.Theta));out.proof.batch_U.push_back(u);absorb_u(T,t,h,u);Fr gamma=T.challenge_nonzero("VME.BF.G2/GAMMA/V2",t);out.challenges.gamma[t]=gamma;Fr g2=fr_mul(gamma,gamma);
-  DoryInstanceState next;next.target.D0=products({gt_pow(bar.target.D0,g2),gt_pow(u,gamma),fresh.D0});next.target.D1=gt_mul(gt_pow(bar.target.D1,gamma),fresh.D1);next.target.D2=gt_mul(gt_pow(bar.target.D2,gamma),fresh.D2);next.witness.Phi.reserve(h);next.witness.Theta.reserve(h);for(size_t i=0;i<h;++i){next.witness.Phi.push_back(g1_add(g1_pow(bar.witness.Phi[i],gamma),fresh.Phi[i]));next.witness.Theta.push_back(g2_add(g2_pow(bar.witness.Theta[i],gamma),fresh.Theta[i]));}agg=next;out.aggregate[t]=next;
- }
- if(agg.witness.Phi.size()!=1||agg.witness.Theta.size()!=1)throw std::logic_error("Dory did not terminate");out.proof.PhiFinal=agg.witness.Phi[0];out.proof.ThetaFinal=agg.witness.Theta[0];std::array<Bytes,2>final{serialize(out.proof.PhiFinal),serialize(out.proof.ThetaFinal)};T.absorb("VME.BF.G2/DORY-FINAL/V2",final);out.challenges.epsilon=T.challenge_nonzero("VME.BF.G2/EPSILON/V2",c.d);out.final_transcript_digest=T.digest();out.final_aggregate_target=agg.target;return out;
+bool valid_claim(const RexpClaims& claim) {
+    return internal::valid_gt(claim.E) && internal::valid_gt(claim.F)
+        && internal::valid_gt(claim.TL) && internal::valid_gt(claim.TR);
 }
+
+bool valid_fresh_instance(const FreshDoryInstance& fresh,
+                          std::size_t expected_size) {
+    if (fresh.Phi.size() != expected_size
+        || fresh.Theta.size() != expected_size
+        || !internal::valid_gt(fresh.D0)
+        || !internal::valid_gt(fresh.D1)
+        || !internal::valid_gt(fresh.D2)) return false;
+    for (const auto& point : fresh.Phi)
+        if (!valid_g1(point)) return false;
+    for (const auto& point : fresh.Theta)
+        if (!valid_g2(point)) return false;
+    return true;
 }
+
+void validate_phase2_inputs(const VmeIbfCRS& crs,
+                            const VmeIbfPrecomputation& precomputation,
+                            const Phase1Result& phase1) {
+    if (!validate_crs(crs)
+        || !validate_precomputation_shape(crs, precomputation)
+        || !validate_precomputation_elements(precomputation)
+        || !audit_precomputation(crs, precomputation)
+        || !validate_statement_shape(crs, phase1.statement)
+        || !validate_statement_elements(phase1.statement)
+        || !validate_statement_digest(crs, phase1.statement)
+        || phase1.rho.size() != crs.d || phase1.r.size() != crs.d
+        || phase1.dynamic_claims.size() != crs.d - 1
+        || phase1.fresh.size() != crs.d + 1 || !valid_g1(phase1.R))
+        throw std::invalid_argument("invalid phase-2 input");
+    for (const auto& claim : phase1.dynamic_claims)
+        if (!valid_claim(claim))
+            throw std::invalid_argument("invalid phase-1 claim");
+    for (std::size_t level = 1; level <= crs.d; ++level)
+        if (!valid_fresh_instance(phase1.fresh[level], crs.n >> level))
+            throw std::invalid_argument("invalid fresh Dory instance");
+    Transcript replay = Transcript::resume(phase1.transcript_start);
+    std::vector<Fr> replayed(crs.d);
+    for (std::size_t j = 0; j < crs.d; ++j) {
+        const RexpClaims claim = j == 0
+            ? internal::initial_rexp_claim(precomputation)
+            : phase1.dynamic_claims[j - 1];
+        internal::absorb_rexp_claim(replay, j, crs.n >> j, claim);
+        replayed[j] = internal::derive_rho(replay, j);
+    }
+    internal::absorb_r(replay, phase1.R);
+    const Digest after_r = replay.digest();
+    if (replayed != phase1.rho || after_r != phase1.transcript_after_R)
+        throw std::invalid_argument("phase-1 transcript continuation mismatch");
+    for (std::size_t j = 0; j < crs.d; ++j)
+        if (phase1.r[crs.d - j - 1] != phase1.rho[j])
+            throw std::invalid_argument("phase-1 challenge ordering mismatch");
+}
+
+DoryInstanceState initial_instance(const VmeIbfCRS& crs,
+                                   const VmeIbfPrecomputation& precomputation,
+                                   const Phase1Result& phase1,
+                                   std::span<const Fr> weights,
+                                   const Fr& q) {
+    DoryInstanceState instance;
+    instance.witness.Phi.reserve(crs.n);
+    instance.witness.Theta.reserve(crs.n);
+    for (std::size_t i = 0; i < crs.n; ++i) {
+        instance.witness.Phi.push_back(g1_pow(crs.L, phase1.statement.x[i]));
+        instance.witness.Theta.push_back(g2_pow(crs.Lprime, weights[i]));
+    }
+    instance.target.D0 = gt_pow(precomputation.pairing_LLprime, q);
+    mcl::bn::pairing(instance.target.D1, crs.L, phase1.statement.X);
+    mcl::bn::pairing(instance.target.D2, phase1.R, crs.Lprime);
+    return instance;
+}
+
+DoryFoldProof first_fold_message(const VmeIbfCRS& crs,
+                                 const DoryInstanceState& aggregate,
+                                 std::size_t half) {
+    DoryFoldProof proof;
+    const auto phi = std::span(aggregate.witness.Phi);
+    const auto theta = std::span(aggregate.witness.Theta);
+    const auto g = std::span(crs.G).first(half);
+    const auto h = std::span(crs.H).first(half);
+    proof.D1L = pairing_product(phi.first(half), h);
+    proof.D1R = pairing_product(phi.subspan(half, half), h);
+    proof.D2L = pairing_product(g, theta.first(half));
+    proof.D2R = pairing_product(g, theta.subspan(half, half));
+    return proof;
+}
+
+void compressed_witness(const VmeIbfCRS& crs,
+                        const DoryInstanceState& aggregate,
+                        const Fr& beta, const Fr& beta_inverse,
+                        std::vector<G1>& phi, std::vector<G2>& theta) {
+    const std::size_t dimension = aggregate.witness.Phi.size();
+    phi.clear();
+    theta.clear();
+    phi.reserve(dimension);
+    theta.reserve(dimension);
+    for (std::size_t i = 0; i < dimension; ++i) {
+        phi.push_back(g1_add(aggregate.witness.Phi[i],
+                             g1_pow(crs.G[i], beta)));
+        theta.push_back(g2_add(aggregate.witness.Theta[i],
+                               g2_pow(crs.H[i], beta_inverse)));
+    }
+}
+
+DoryInstanceState fold_instance(const VmeIbfPrecomputation& precomputation,
+                                const DoryInstanceState& aggregate,
+                                DoryFoldProof& proof,
+                                std::span<const G1> compressed_phi,
+                                std::span<const G2> compressed_theta,
+                                std::size_t round,
+                                const Fr& beta, const Fr& beta_inverse,
+                                const Fr& alpha, const Fr& alpha_inverse) {
+    const std::size_t half = compressed_phi.size() / 2;
+    proof.W1 = pairing_product(compressed_phi.first(half),
+                               compressed_theta.subspan(half, half));
+    proof.W2 = pairing_product(compressed_phi.subspan(half, half),
+                               compressed_theta.first(half));
+    DoryInstanceState folded;
+    folded.witness.Phi.reserve(half);
+    folded.witness.Theta.reserve(half);
+    for (std::size_t i = 0; i < half; ++i) {
+        folded.witness.Phi.push_back(g1_add(
+            g1_pow(compressed_phi[i], alpha), compressed_phi[half + i]));
+        folded.witness.Theta.push_back(g2_add(
+            g2_pow(compressed_theta[i], alpha_inverse),
+            compressed_theta[half + i]));
+    }
+    folded.target.D0 = product({aggregate.target.D0,
+        precomputation.pairing_x[round],
+        gt_pow(aggregate.target.D1, beta_inverse),
+        gt_pow(aggregate.target.D2, beta),
+        gt_pow(proof.W1, alpha), gt_pow(proof.W2, alpha_inverse)});
+    folded.target.D1 = product({gt_pow(proof.D1L, alpha), proof.D1R,
+        gt_pow(precomputation.pairing_x[round + 1],
+               internal::fr_multiply(alpha, beta)),
+        gt_pow(precomputation.delta1R[round], beta)});
+    folded.target.D2 = product({gt_pow(proof.D2L, alpha_inverse), proof.D2R,
+        gt_pow(precomputation.pairing_x[round + 1],
+               internal::fr_multiply(alpha_inverse, beta_inverse)),
+        gt_pow(precomputation.delta2R[round], beta_inverse)});
+    return folded;
+}
+
+DoryInstanceState batch_instances(const DoryInstanceState& folded,
+                                  const FreshDoryInstance& fresh,
+                                  const GT& u, const Fr& gamma) {
+    const Fr gamma_squared = internal::fr_multiply(gamma, gamma);
+    DoryInstanceState result;
+    result.target.D0 = product({gt_pow(folded.target.D0, gamma_squared),
+                                gt_pow(u, gamma), fresh.D0});
+    result.target.D1 = gt_mul(gt_pow(folded.target.D1, gamma), fresh.D1);
+    result.target.D2 = gt_mul(gt_pow(folded.target.D2, gamma), fresh.D2);
+    result.witness.Phi.reserve(fresh.Phi.size());
+    result.witness.Theta.reserve(fresh.Theta.size());
+    for (std::size_t i = 0; i < fresh.Phi.size(); ++i) {
+        result.witness.Phi.push_back(g1_add(
+            g1_pow(folded.witness.Phi[i], gamma), fresh.Phi[i]));
+        result.witness.Theta.push_back(g2_add(
+            g2_pow(folded.witness.Theta[i], gamma), fresh.Theta[i]));
+    }
+    return result;
+}
+
+} // namespace
+
+Phase2Result prove_phase2(const VmeIbfCRS& crs,
+                          const VmeIbfPrecomputation& precomputation,
+                          const Phase1Result& phase1) {
+    validate_phase2_inputs(crs, precomputation, phase1);
+    Phase2Result result;
+    result.proof.dory_folds.reserve(crs.d);
+    result.proof.batch_U.reserve(crs.d);
+    result.challenges.beta.resize(crs.d);
+    result.challenges.alpha.resize(crs.d);
+    result.challenges.gamma.resize(crs.d + 1);
+    result.challenges.gamma[0].clear();
+    result.folded.resize(crs.d + 1);
+    result.aggregate.resize(crs.d + 1);
+
+    Transcript transcript = Transcript::resume(phase1.transcript_after_R);
+    const auto weights = tensor_vector(phase1.r);
+    if (weights.size() != crs.n) throw std::logic_error("tensor length mismatch");
+    result.q = inner_product(weights, phase1.statement.x);
+    internal::absorb_vme_initial(transcript, crs.d, crs.n, result.q);
+    DoryInstanceState aggregate = initial_instance(
+        crs, precomputation, phase1, weights, result.q);
+    result.initial_instance = aggregate;
+    result.aggregate[0] = aggregate;
+
+    std::vector<G1> compressed_phi;
+    std::vector<G2> compressed_theta;
+    for (std::size_t t = 1; t <= crs.d; ++t) {
+        const std::size_t round = t - 1;
+        const std::size_t dimension = crs.n >> round;
+        const std::size_t half = dimension / 2;
+        if (aggregate.witness.Phi.size() != dimension
+            || aggregate.witness.Theta.size() != dimension)
+            throw std::logic_error("aggregate dimension mismatch");
+
+        DoryFoldProof fold_proof = first_fold_message(crs, aggregate, half);
+        internal::absorb_dory_beta(
+            transcript, round, dimension, fold_proof);
+        const Fr beta = internal::derive_beta(transcript, round);
+        const Fr beta_inverse = inverse_nonzero(beta);
+        result.challenges.beta[round] = beta;
+        compressed_witness(crs, aggregate, beta, beta_inverse,
+                           compressed_phi, compressed_theta);
+
+        fold_proof.W1 = pairing_product(
+            std::span(compressed_phi).first(half),
+            std::span(compressed_theta).subspan(half, half));
+        fold_proof.W2 = pairing_product(
+            std::span(compressed_phi).subspan(half, half),
+            std::span(compressed_theta).first(half));
+        internal::absorb_dory_alpha(
+            transcript, round, dimension, fold_proof);
+        const Fr alpha = internal::derive_alpha(transcript, round);
+        const Fr alpha_inverse = inverse_nonzero(alpha);
+        result.challenges.alpha[round] = alpha;
+        DoryInstanceState folded = fold_instance(
+            precomputation, aggregate, fold_proof, compressed_phi,
+            compressed_theta, round, beta, beta_inverse, alpha, alpha_inverse);
+        result.folded[t] = folded;
+        result.proof.dory_folds.push_back(fold_proof);
+
+        const FreshDoryInstance& fresh = phase1.fresh[t];
+        if (fresh.Phi.size() != half || fresh.Theta.size() != half)
+            throw std::logic_error("fresh dimension mismatch");
+        const GT u = gt_mul(pairing_product(folded.witness.Phi, fresh.Theta),
+                            pairing_product(fresh.Phi, folded.witness.Theta));
+        result.proof.batch_U.push_back(u);
+        internal::absorb_batch_u(transcript, t, half, u);
+        const Fr gamma = internal::derive_gamma(transcript, t);
+        result.challenges.gamma[t] = gamma;
+        aggregate = batch_instances(folded, fresh, u, gamma);
+        result.aggregate[t] = aggregate;
+    }
+
+    if (aggregate.witness.Phi.size() != 1
+        || aggregate.witness.Theta.size() != 1)
+        throw std::logic_error("Dory did not terminate");
+    result.proof.PhiFinal = aggregate.witness.Phi[0];
+    result.proof.ThetaFinal = aggregate.witness.Theta[0];
+    internal::absorb_dory_final(
+        transcript, result.proof.PhiFinal, result.proof.ThetaFinal);
+    result.challenges.epsilon = internal::derive_epsilon(transcript, crs.d);
+    result.final_transcript_digest = transcript.digest();
+    result.final_aggregate_target = aggregate.target;
+    return result;
+}
+
+} // namespace vme_ibf

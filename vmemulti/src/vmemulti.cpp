@@ -1,6 +1,7 @@
 #include "vme_ibf/vmemulti.hpp"
 #include "vme_ibf/serialization.hpp"
 #include "vme_ibf/verify_online.hpp"
+#include "internal/core_context.hpp"
 #include <array>
 #include <chrono>
 #include <limits>
@@ -73,9 +74,8 @@ std::pair<std::vector<Fr>, std::vector<Fr>> aggregate_z_and_scalars(
 
 bool validate_vmemulti_statement(const VmeIbfCRS& c,
                                  const VmeMultiStatement& statement) {
-  if (c.d < 1 || c.d >= std::numeric_limits<std::size_t>::digits ||
-      c.n != (std::size_t{1} << c.d) || c.G.size() != c.n ||
-      c.H.size() != c.n || statement.x_instances.empty() ||
+  if (!validate_crs_shape(c) || statement.x_instances.empty() ||
+      statement.x_instances.size() > kMaxVmeMultiInstances ||
       statement.x_instances.size() != statement.X_instances.size())
     return false;
   for (const auto& x : statement.x_instances) {
@@ -91,8 +91,8 @@ bool validate_vmemulti_statement(const VmeIbfCRS& c,
 Digest compute_vmemulti_binding_digest(const VmeIbfCRS& c,
                                        const VmeIbfPrecomputation& p,
                                        const VmeMultiStatement& statement) {
-  if (!validate_vmemulti_statement(c, statement) ||
-      compute_crs_digest(c) != c.digest || !validate_precomputation(c, p))
+  if (!validate_vmemulti_statement(c, statement) || !validate_crs(c)
+      || !audit_precomputation(c, p))
     throw std::invalid_argument("invalid vmemulti statement, CRS, or precomputation");
   return binding_digest_unchecked(c, sha256(serialize_precomputation(c, p)),
                                   statement);
@@ -112,7 +112,7 @@ AggregatedInstance aggregate_instances(
     const std::vector<std::vector<Fr>>& x_instances,
     const std::vector<G2>& X_instances, const Fr& gamma) {
   if (x_instances.empty() || x_instances.size() != X_instances.size() ||
-      gamma.isZero())
+      x_instances.size() > kMaxVmeMultiInstances || gamma.isZero())
     throw std::invalid_argument("invalid aggregation input");
   const std::size_t n = x_instances.front().size();
   if (n == 0) throw std::invalid_argument("empty exponent vector");
@@ -170,9 +170,8 @@ ReferenceVerificationTrace verify_vmemulti_diagnostic(
 bool verify_vmemulti(const VmeIbfCRS& c, const VmeIbfPrecomputation& p,
                      const VmeMultiStatement& statement,
                      const VmeIbfProof& proof) {
-  ValidatedVmeMultiInputs inputs;
-  return prepare_validated_vmemulti_inputs(c, p, statement, proof, inputs) &&
-         verify_vmemulti_online(inputs);
+  const auto inputs = validate_vmemulti_inputs(c, p, statement, proof);
+  return inputs && verify_vmemulti_online(*inputs);
 }
 
 CombinedVerificationTrace verify_vmemulti_combined_diagnostic(
@@ -190,21 +189,21 @@ CombinedVerificationTrace verify_vmemulti_combined_diagnostic(
     VmeIbfStatementInput input{core_statement.x, {}};
     input.digest = compute_statement_input_digest(c, input.x);
     core_statement.digest = compute_statement_digest(c, input, core_statement.X);
-    core_statement.transcript_state = after_gamma;
-    core_statement.has_transcript_state = true;
-    return verify_deferred_combined_with_trace(c, p, core_statement, proof);
+    const auto core_inputs = validate_verification_inputs(
+        c, p, core_statement, proof);
+    if (!core_inputs) return {};
+    return internal::verify_with_transcript_unchecked(
+        c, p, core_statement, proof, after_gamma, true);
   } catch (...) {
     return {};
   }
 }
 
-bool prepare_validated_vmemulti_inputs(
+std::optional<ValidatedVmeMultiInputs> validate_vmemulti_inputs(
     const VmeIbfCRS& c, const VmeIbfPrecomputation& p,
-    const VmeMultiStatement& statement, const VmeIbfProof& proof,
-    ValidatedVmeMultiInputs& out) {
-  out = {};
+    const VmeMultiStatement& statement, const VmeIbfProof& proof) {
   try {
-    if (!validate_vmemulti_statement(c, statement)) return false;
+    if (!validate_vmemulti_statement(c, statement)) return std::nullopt;
     const Digest precomputation_digest =
         sha256(serialize_precomputation(c, p));
     const Digest binding =
@@ -219,15 +218,13 @@ bool prepare_validated_vmemulti_inputs(
     VmeIbfStatementInput input{core_statement.x, {}};
     input.digest = compute_statement_input_digest(c, input.x);
     core_statement.digest = compute_statement_digest(c, input, core_statement.X);
-    ValidatedVerificationInputs core_inputs;
-    if (!prepare_validated_verification_inputs(c, p, core_statement, proof,
-                                               core_inputs))
-      return false;
-    out = {&c, &p, &statement, &proof, precomputation_digest};
-    return true;
+    const auto core_inputs = validate_verification_inputs(
+        c, p, core_statement, proof);
+    if (!core_inputs) return std::nullopt;
+    return ValidatedVmeMultiInputs(
+        c, p, statement, proof, precomputation_digest);
   } catch (...) {
-    out = {};
-    return false;
+    return std::nullopt;
   }
 }
 
@@ -240,14 +237,11 @@ VmeMultiOnlineVerificationTrace verify_vmemulti_online_with_trace(
   VmeMultiOnlineVerificationTrace out;
   const auto total_start = Clock::now();
   try {
-    if (!inputs.crs || !inputs.precomputation || !inputs.statement ||
-        !inputs.proof)
-      return out;
-    const auto& c = *inputs.crs;
-    const auto& statement = *inputs.statement;
+    const auto& c = inputs.crs();
+    const auto& statement = inputs.statement();
     auto start = Clock::now();
     const Digest binding = binding_digest_unchecked(
-        c, inputs.precomputation_binding_digest, statement);
+        c, inputs.precomputation_binding_digest(), statement);
     auto end = Clock::now();
     out.transcript_prefix_ms = ms(start, end);
 
@@ -272,13 +266,15 @@ VmeMultiOnlineVerificationTrace verify_vmemulti_online_with_trace(
     VmeIbfStatement core_statement;
     core_statement.x = std::move(z);
     core_statement.X = Y;
-    core_statement.transcript_state = after_gamma;
-    core_statement.has_transcript_state = true;
-    ValidatedVerificationInputs core_inputs{
-        &c, inputs.precomputation, &core_statement, inputs.proof};
+    VmeIbfStatementInput input{core_statement.x, {}};
+    input.digest = compute_statement_input_digest(c, input.x);
+    core_statement.digest = compute_statement_digest(
+        c, input, core_statement.X);
     end = Clock::now();
     out.core_input_construction_ms = ms(start, end);
-    out.core = verify_online_with_trace(core_inputs);
+    out.core = internal::verify_with_transcript_unchecked(
+        c, inputs.precomputation(), core_statement,
+        inputs.proof(), after_gamma);
     out.accepted = out.core.accepted;
     out.total_ms = ms(total_start, Clock::now());
     return out;

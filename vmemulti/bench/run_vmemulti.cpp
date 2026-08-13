@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
     initialize();
     const std::size_t d = number(argv[1], "d");
     const std::size_t m = number(argv[2], "m");
-    if (d < 1 || d > 12 || m < 1)
+    if (d < 1 || d > 12 || m < 1 || m > kMaxVmeMultiInstances)
       throw std::invalid_argument("unsupported parameters");
     const std::size_t n = std::size_t{1} << d;
 
@@ -78,13 +78,13 @@ int main(int argc, char** argv) {
     const auto proof =
         prove_vmemulti(fixture.crs, fixture.precomp, statement);
 
-    ValidatedVmeMultiInputs validated;
-    if (!prepare_validated_vmemulti_inputs(
-            fixture.crs, fixture.precomp, statement, proof, validated))
+    const auto validated = validate_vmemulti_inputs(
+        fixture.crs, fixture.precomp, statement, proof);
+    if (!validated)
       throw std::runtime_error("input validation failed");
 
     const auto verify_start = std::chrono::steady_clock::now();
-    const bool accepted = verify_vmemulti_online(validated);
+    const bool accepted = verify_vmemulti_online(*validated);
     const auto verify_end = std::chrono::steady_clock::now();
     if (!accepted) throw std::runtime_error("verification failed");
 
@@ -100,7 +100,8 @@ int main(int argc, char** argv) {
               << "Proof size: " << proof_bytes << " bytes\n"
               << "CRS size: " << crs_bytes << " bytes\n";
     return EXIT_SUCCESS;
-  } catch (...) {
+  } catch (const std::exception& error) {
+    std::cerr << "Error: " << error.what() << '\n';
     return EXIT_FAILURE;
   }
 }

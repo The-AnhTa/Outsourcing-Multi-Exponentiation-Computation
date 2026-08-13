@@ -3,9 +3,11 @@
 #include "vme_ibf/proof.hpp"
 #include "vme_ibf/verify_reference.hpp"
 #include "vme_ibf/verify_combined.hpp"
+#include <optional>
 
 namespace vme_ibf {
 
+inline constexpr std::size_t kMaxVmeMultiInstances = 1024;
 
 
 struct VmeMultiStatement {
@@ -25,12 +27,32 @@ struct VmeMultiProverTrace {
   Phase2Result phase2;
 };
 
-struct ValidatedVmeMultiInputs {
-  const VmeIbfCRS* crs{};
-  const VmeIbfPrecomputation* precomputation{};
-  const VmeMultiStatement* statement{};
-  const VmeIbfProof* proof{};
-  Digest precomputation_binding_digest{};
+class ValidatedVmeMultiInputs {
+ public:
+  const VmeIbfCRS& crs() const { return crs_; }
+  const VmeIbfPrecomputation& precomputation() const { return precomputation_; }
+  const VmeMultiStatement& statement() const { return statement_; }
+  const VmeIbfProof& proof() const { return proof_; }
+  const Digest& precomputation_binding_digest() const {
+    return precomputation_binding_digest_;
+  }
+ private:
+  ValidatedVmeMultiInputs(const VmeIbfCRS& crs,
+                         const VmeIbfPrecomputation& precomputation,
+                         const VmeMultiStatement& statement,
+                         const VmeIbfProof& proof,
+                         const Digest& precomputation_binding_digest)
+      : crs_(crs), precomputation_(precomputation), statement_(statement),
+        proof_(proof),
+        precomputation_binding_digest_(precomputation_binding_digest) {}
+  VmeIbfCRS crs_;
+  VmeIbfPrecomputation precomputation_;
+  VmeMultiStatement statement_;
+  VmeIbfProof proof_;
+  Digest precomputation_binding_digest_{};
+  friend std::optional<ValidatedVmeMultiInputs> validate_vmemulti_inputs(
+      const VmeIbfCRS&, const VmeIbfPrecomputation&,
+      const VmeMultiStatement&, const VmeIbfProof&);
 };
 
 struct VmeMultiOnlineVerificationTrace {
@@ -64,9 +86,9 @@ CombinedVerificationTrace verify_vmemulti_combined_diagnostic(
     const VmeIbfProof&);
 bool verify_vmemulti(const VmeIbfCRS&, const VmeIbfPrecomputation&,
                      const VmeMultiStatement&, const VmeIbfProof&);
-bool prepare_validated_vmemulti_inputs(
-    const VmeIbfCRS&, const VmeIbfPrecomputation&, const VmeMultiStatement&,
-    const VmeIbfProof&, ValidatedVmeMultiInputs&);
+std::optional<ValidatedVmeMultiInputs> validate_vmemulti_inputs(
+    const VmeIbfCRS&, const VmeIbfPrecomputation&,
+    const VmeMultiStatement&, const VmeIbfProof&);
 bool verify_vmemulti_online(const ValidatedVmeMultiInputs&);
 VmeMultiOnlineVerificationTrace verify_vmemulti_online_with_trace(
     const ValidatedVmeMultiInputs&);

@@ -21,10 +21,6 @@ struct VmeIbfStatement {
   std::vector<Fr> x;
   G2 X;
   Digest digest{};
-
-
-  Digest transcript_state{};
-  bool has_transcript_state{};
 };
 struct FreshDoryInstance { GT D0, D1, D2; std::vector<G1> Phi; std::vector<G2> Theta; };
 struct RexpClaims { GT E, F, TL, TR; };
@@ -35,6 +31,7 @@ struct Phase1Result {
   std::vector<RexpClaims> dynamic_claims;
   std::vector<FreshDoryInstance> fresh;
   G1 R;
+  Digest transcript_start{};
   Digest transcript_after_R{};
 };
 struct DoryTargetState { GT D0, D1, D2; };
