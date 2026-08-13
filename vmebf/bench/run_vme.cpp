@@ -1,10 +1,4 @@
-#include "vme_ibf/group_utils.hpp"
-#include "vme_ibf/phase1.hpp"
-#include "vme_ibf/phase2.hpp"
-#include "vme_ibf/proof.hpp"
-#include "vme_ibf/serialization.hpp"
-#include "vme_ibf/setup.hpp"
-#include "vme_ibf/verify_online.hpp"
+#include "vme_ibf/vme_ibf.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -56,15 +50,14 @@ int main(int argc, char** argv) {
         const auto proof =
             vme_ibf::assemble_public_proof(phase1, phase2);
 
-        vme_ibf::ValidatedVerificationInputs inputs;
-        if (!vme_ibf::prepare_validated_verification_inputs(
-                setup_result.crs, setup_result.precomp, phase1.statement,
-                proof, inputs)) {
+        const auto inputs = vme_ibf::validate_verification_inputs(
+            setup_result.crs, setup_result.precomp, phase1.statement, proof);
+        if (!inputs) {
             throw std::runtime_error("invalid verification inputs");
         }
 
         const auto verify_start = std::chrono::steady_clock::now();
-        const bool accepted = vme_ibf::verify_online(inputs);
+        const bool accepted = vme_ibf::verify_online(*inputs);
         const auto verify_end = std::chrono::steady_clock::now();
         if (!accepted) {
             throw std::runtime_error("verification failed");
@@ -84,7 +77,8 @@ int main(int argc, char** argv) {
                   << "Proof size: " << proof_bytes << " bytes\n"
                   << "CRS size: " << crs_bytes << " bytes\n";
         return EXIT_SUCCESS;
-    } catch (...) {
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << '\n';
         return EXIT_FAILURE;
     }
 }

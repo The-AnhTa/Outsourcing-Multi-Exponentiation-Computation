@@ -1,33 +1,210 @@
 #include "vme_ibf/verify_deferred.hpp"
+
 #include "vme_ibf/verify_combined.hpp"
 #include "vme_ibf/verify_online.hpp"
-#include "vme_ibf/serialization.hpp"
-#include "vme_ibf/batch_inversion.hpp"
-#include "vme_ibf/setup.hpp"
-#include "vme_ibf/transcript.hpp"
-#include <mcl/gmp_util.hpp>
-#include <array>
-#include <chrono>
-#include <limits>
-namespace vme_ibf { namespace {
-Fr fm(const Fr&a,const Fr&b){Fr z;Fr::mul(z,a,b);return z;}Fr minus_one(){Fr z;z=-1;return z;}
-template<class T>bool canonical(const T&x){try{auto b=serialize(x);T y;return y.deserialize(b.data(),b.size())==b.size()&&y==x;}catch(...){return false;}}
-bool valid_gt(const GT&x){if(!canonical(x))return false;mpz_class o;mcl::gmp::setStr(o,Fr::getModulo(),10);GT y;GT::pow(y,x,o);GT one;one.setOne();return y==one;}
-Digest statement_digest(const VmeIbfCRS&c,const Digest&id,const G2&X){Bytes b;append_frame(b,"VME.BF.G2/STATEMENT/V2");append_frame(b,c.digest);append_frame(b,id);append_frame(b,serialize(X));return sha256(b);}
-bool validate(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v){if(c.d<1||c.d>=std::numeric_limits<size_t>::digits||c.n!=(size_t{1}<<c.d)||c.G.size()!=c.n||c.H.size()!=c.n||s.x.size()!=c.n||p.pairing_x.size()!=c.d+1||p.delta1R.size()!=c.d||p.delta2R.size()!=c.d||v.rexp_claims.size()!=c.d-1||v.dory_folds.size()!=c.d||v.batch_U.size()!=c.d)return false;for(auto&x:c.G)if(!valid_g1(x,true))return false;for(auto&x:c.H)if(!valid_g2(x,true))return false;if(!valid_g1(c.L,true)||!valid_g2(c.Lprime,true)||!valid_g2(s.X)||!valid_g1(v.R)||!valid_g1(v.PhiFinal)||!valid_g2(v.ThetaFinal))return false;for(auto&x:p.pairing_x)if(!valid_gt(x))return false;for(auto&x:p.delta1R)if(!valid_gt(x))return false;for(auto&x:p.delta2R)if(!valid_gt(x))return false;if(!valid_gt(p.pairing_LLprime))return false;for(auto&r:v.rexp_claims)if(!valid_gt(r.E)||!valid_gt(r.F)||!valid_gt(r.TL)||!valid_gt(r.TR))return false;for(auto&f:v.dory_folds)if(!valid_gt(f.D1L)||!valid_gt(f.D1R)||!valid_gt(f.D2L)||!valid_gt(f.D2R)||!valid_gt(f.W1)||!valid_gt(f.W2))return false;for(auto&u:v.batch_U)if(!valid_gt(u))return false;if(compute_crs_digest(c)!=c.digest)return false;auto id=compute_statement_input_digest(c,s.x);return statement_digest(c,id,s.X)==s.digest;}
-struct Challenges{std::vector<Fr>rho,beta,alpha,gamma;Fr epsilon,q;Digest after_epsilon{};};
-bool replay(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v,Challenges&o){Transcript T(s.digest);o.rho.resize(c.d);for(size_t j=0;j<c.d;++j){RexpClaims r=j?v.rexp_claims[j-1]:RexpClaims{p.delta1R[0],p.delta2R[0],p.pairing_x[1],p.delta1R[0]};std::array<Bytes,6>f{encode_u64_be(j),encode_u64_be(c.n>>j),serialize(r.E),serialize(r.F),serialize(r.TL),serialize(r.TR)};T.absorb("VME.BF.G2/REXP-G1-CLAIMS/V2",f);o.rho[j]=T.challenge_nonzero("VME.BF.G2/RHO/V2",j);}T.absorb("VME.BF.G2/R-G1/V2",serialize(v.R));std::vector<Fr>r(c.d);for(size_t j=0;j<c.d;++j)r[c.d-j-1]=o.rho[j];auto w=tensor_vector(r);if(w.size()!=c.n)return false;o.q=inner_product(w,s.x);std::array<Bytes,3>ini{encode_u64_be(c.d),encode_u64_be(c.n),serialize(o.q)};T.absorb("VME.BF.G2/VME-INITIAL/V2",ini);o.beta.resize(c.d);o.alpha.resize(c.d);o.gamma.resize(c.d+1);o.gamma[0].clear();for(size_t t=1;t<=c.d;++t){size_t k=t-1,m=c.n>>k,h=m/2;auto&x=v.dory_folds[k];std::array<Bytes,6>b{encode_u64_be(k),encode_u64_be(m),serialize(x.D1L),serialize(x.D1R),serialize(x.D2L),serialize(x.D2R)};T.absorb("VME.BF.G2/DORY-BETA-MESSAGE/V2",b);o.beta[k]=T.challenge_nonzero("VME.BF.G2/BETA/V2",k);std::array<Bytes,4>a{encode_u64_be(k),encode_u64_be(m),serialize(x.W1),serialize(x.W2)};T.absorb("VME.BF.G2/DORY-ALPHA-MESSAGE/V2",a);o.alpha[k]=T.challenge_nonzero("VME.BF.G2/ALPHA/V2",k);std::array<Bytes,3>u{encode_u64_be(t),encode_u64_be(h),serialize(v.batch_U[k])};T.absorb("VME.BF.G2/BATCH-U/V2",u);o.gamma[t]=T.challenge_nonzero("VME.BF.G2/GAMMA/V2",t);}std::array<Bytes,2>fin{serialize(v.PhiFinal),serialize(v.ThetaFinal)};T.absorb("VME.BF.G2/DORY-FINAL/V2",fin);o.epsilon=T.challenge_nonzero("VME.BF.G2/EPSILON/V2",c.d);o.after_epsilon=T.digest();return true;}
-SymbolicGtExpression ga(GtAtomKind k,size_t i=0){return gt_atom({k,i});}SymbolicGtExpression pa(PairingAtomKind k){return pairing_atom({k});}void mul(SymbolicGtExpression&x,const SymbolicGtExpression&y){multiply_in_place(x,y);}void mulpow(SymbolicGtExpression&x,const SymbolicGtExpression&y,const Fr&s){mul(x,powered(y,s));}
+#include "internal/crypto.hpp"
+#include "internal/protocol.hpp"
+#include "internal/verification.hpp"
+
+namespace vme_ibf {
+namespace {
+
+struct Resolvers {
+    GtAtomResolver gt;
+    PairingAtomResolver pairing;
+};
+
+Resolvers resolvers(const VmeIbfCRS& crs,
+                    const VmeIbfPrecomputation& precomputation,
+                    const VmeIbfStatement& statement,
+                    const VmeIbfProof& proof,
+                    const internal::VerificationEquations& equations) {
+    const auto* crs_ptr = &crs;
+    const auto* precomputation_ptr = &precomputation;
+    const auto* statement_ptr = &statement;
+    const auto* proof_ptr = &proof;
+    const auto* equations_ptr = &equations;
+    return {
+        [precomputation_ptr, proof_ptr](GtAtomId id) -> const GT& {
+            return internal::resolve_gt_atom(
+                id, *precomputation_ptr, *proof_ptr);
+        },
+        [crs_ptr, statement_ptr, proof_ptr, equations_ptr](PairingAtomId id) {
+            return internal::resolve_pairing_atom(
+                id, *crs_ptr, *statement_ptr, *proof_ptr, *equations_ptr);
+        }};
 }
-static DeferredVerificationTrace verify_impl(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v,bool audit_reference_msm,CombinedVerificationTrace*combined,bool inputs_validated){using Clock=std::chrono::steady_clock;auto elapsed=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};auto profile_start=Clock::now();DeferredVerificationTrace tr;try{if(!inputs_validated&&!validate(c,p,s,v))return tr;Challenges h;if(!replay(c,p,s,v,h))return tr;auto after_replay=Clock::now();tr.rho=h.rho;tr.beta=h.beta;tr.alpha=h.alpha;tr.gamma=h.gamma;tr.epsilon=h.epsilon;std::vector<Fr>vals;vals.insert(vals.end(),h.rho.begin(),h.rho.end());vals.insert(vals.end(),h.beta.begin(),h.beta.end());vals.insert(vals.end(),h.alpha.begin(),h.alpha.end());vals.push_back(h.epsilon);auto iv=batch_invert_nonzero(vals);auto after_inversion=Clock::now();size_t bo=c.d,ao=2*c.d,eo=3*c.d;std::vector<std::array<SymbolicGtExpression,3>>fresh(c.d+1);auto outer=ga(GtAtomKind::PairingX,0);
-for(size_t j=0;j<c.d;++j){auto E=j?ga(GtAtomKind::RexpE,j):ga(GtAtomKind::Delta1R,0),F=j?ga(GtAtomKind::RexpF,j):ga(GtAtomKind::Delta2R,0),TL=j?ga(GtAtomKind::RexpTL,j):ga(GtAtomKind::PairingX,1),TR=j?ga(GtAtomKind::RexpTR,j):ga(GtAtomKind::Delta1R,0);fresh[j+1][0]=outer;mulpow(fresh[j+1][0],E,h.rho[j]);mulpow(fresh[j+1][0],F,iv[j]);fresh[j+1][1]=TL;mulpow(fresh[j+1][1],TR,h.rho[j]);fresh[j+1][2]=ga(GtAtomKind::PairingX,j+1);mulpow(fresh[j+1][2],ga(GtAtomKind::Delta2R,j),iv[j]);outer=fresh[j+1][1];}
-auto A0=powered(ga(GtAtomKind::PairingLLprime),h.q),A1=pa(PairingAtomKind::InitialLX),A2=pa(PairingAtomKind::InitialRLprime);for(size_t t=1;t<=c.d;++t){size_t k=t-1;Fr b=h.beta[k],bi=iv[bo+k],a=h.alpha[k],ai=iv[ao+k],g=h.gamma[t];auto B0=A0;mul(B0,ga(GtAtomKind::PairingX,k));mulpow(B0,A1,bi);mulpow(B0,A2,b);mulpow(B0,ga(GtAtomKind::DoryW1,k),a);mulpow(B0,ga(GtAtomKind::DoryW2,k),ai);auto B1=powered(ga(GtAtomKind::DoryD1L,k),a);mul(B1,ga(GtAtomKind::DoryD1R,k));mulpow(B1,ga(GtAtomKind::PairingX,k+1),fm(a,b));mulpow(B1,ga(GtAtomKind::Delta1R,k),b);auto B2=powered(ga(GtAtomKind::DoryD2L,k),ai);mul(B2,ga(GtAtomKind::DoryD2R,k));mulpow(B2,ga(GtAtomKind::PairingX,k+1),fm(ai,bi));mulpow(B2,ga(GtAtomKind::Delta2R,k),bi);A0=powered(B0,fm(g,g));mulpow(A0,ga(GtAtomKind::BatchU,t),g);mul(A0,fresh[t][0]);A1=powered(B1,g);mul(A1,fresh[t][1]);A2=powered(B2,g);mul(A2,fresh[t][2]);normalize(A0);normalize(A1);normalize(A2);}auto after_recurrence=Clock::now();
-Fr ei=iv[eo];G1 pt=g1_add(v.PhiFinal,g1_pow(c.G[0],h.epsilon));G2 qt=g2_add(v.ThetaFinal,g2_pow(c.H[0],ei));auto d=A0;mulpow(d,A1,ei);mulpow(d,A2,h.epsilon);mul(d,ga(GtAtomKind::PairingX,c.d));mulpow(d,pa(PairingAtomKind::TerminalDory),minus_one());tr.dory_gt_terms_before_normalize=d.gt_terms.size();normalize(d);tr.dory_gt_terms_after_normalize=d.gt_terms.size();tr.dory_pairing_terms=d.pairing_terms.size();auto r=pa(PairingAtomKind::TerminalRexp);mulpow(r,outer,minus_one());tr.rexp_gt_terms_before_normalize=r.gt_terms.size();normalize(r);tr.rexp_gt_terms_after_normalize=r.gt_terms.size();tr.rexp_pairing_terms=r.pairing_terms.size();auto gr=[&](GtAtomId id)->const GT&{switch(id.kind){case GtAtomKind::PairingX:return p.pairing_x[id.index];case GtAtomKind::Delta1R:return p.delta1R[id.index];case GtAtomKind::Delta2R:return p.delta2R[id.index];case GtAtomKind::PairingLLprime:return p.pairing_LLprime;case GtAtomKind::RexpE:return v.rexp_claims[id.index-1].E;case GtAtomKind::RexpF:return v.rexp_claims[id.index-1].F;case GtAtomKind::RexpTL:return v.rexp_claims[id.index-1].TL;case GtAtomKind::RexpTR:return v.rexp_claims[id.index-1].TR;case GtAtomKind::DoryD1L:return v.dory_folds[id.index].D1L;case GtAtomKind::DoryD1R:return v.dory_folds[id.index].D1R;case GtAtomKind::DoryD2L:return v.dory_folds[id.index].D2L;case GtAtomKind::DoryD2R:return v.dory_folds[id.index].D2R;case GtAtomKind::DoryW1:return v.dory_folds[id.index].W1;case GtAtomKind::DoryW2:return v.dory_folds[id.index].W2;case GtAtomKind::BatchU:return v.batch_U[id.index-1];}throw std::logic_error("GT atom");};auto pr=[&](PairingAtomId id){switch(id.kind){case PairingAtomKind::InitialLX:return PairingInputs{c.L,s.X};case PairingAtomKind::InitialRLprime:return PairingInputs{v.R,c.Lprime};case PairingAtomKind::TerminalDory:return PairingInputs{pt,qt};case PairingAtomKind::TerminalRexp:return PairingInputs{v.R,c.H[0]};}throw std::logic_error("pairing atom");};auto after_terminal=Clock::now();if(combined){Transcript T=Transcript::resume(h.after_epsilon);Fr eta=T.challenge_nonzero("VME.BF.G2/ETA/V2",c.d);auto z=d;mulpow(z,r,eta);combined->gt_terms_before_normalize=z.gt_terms.size();combined->pairing_terms_before_normalize=z.pairing_terms.size();normalize(z);combined->gt_terms_after_normalize=z.gt_terms.size();combined->pairing_terms_after_normalize=z.pairing_terms.size();combined->rho=h.rho;combined->beta=h.beta;combined->alpha=h.alpha;combined->gamma=h.gamma;combined->epsilon=h.epsilon;combined->eta=eta;combined->final_transcript_digest=T.digest();auto after_combined_normalize=Clock::now();if(audit_reference_msm){combined->evaluated_dory_residual=evaluate_symbolic_expression(d,gr,pr,MultiexpMode::Reference);combined->evaluated_rexp_residual=evaluate_symbolic_expression(r,gr,pr,MultiexpMode::Reference);combined->evaluated_combined_reference=evaluate_symbolic_expression(z,gr,pr,MultiexpMode::Reference);}PairingProductStats ps;combined->evaluated_combined_residual=evaluate_symbolic_expression(z,gr,pr,MultiexpMode::Pippenger,nullptr,&ps);auto after_evaluation=Clock::now();combined->coalesced_pairing_terms=ps.coalesced_pairing_terms;combined->miller_loop_batches=ps.miller_loop_batches;combined->miller_loop_terms=ps.miller_loop_terms;combined->final_exponentiations=ps.final_exponentiations;combined->gt_msm_ms=ps.gt_msm_ms;combined->multi_pairing_ms=ps.multi_pairing_ms;GT one;one.setOne();combined->accepted=combined->evaluated_combined_residual==one;combined->gt_multiexp_calls=1;combined->pairing_product_calls=1;combined->intermediate_gt_exponentiations=0;combined->underlying_pairings=z.pairing_terms.size();combined->transcript_ms=elapsed(profile_start,after_replay);combined->batch_inversion_ms=elapsed(after_replay,after_inversion);combined->recurrence_ms=elapsed(after_inversion,after_recurrence);combined->terminal_assembly_ms=elapsed(after_recurrence,after_terminal);combined->combined_normalize_ms=elapsed(after_terminal,after_combined_normalize);combined->gt_msm_pairing_ms=elapsed(after_combined_normalize,after_evaluation);combined->total_ms=elapsed(profile_start,Clock::now());tr.accepted=combined->accepted;return tr;}if(audit_reference_msm){tr.dory_residual_reference=evaluate_symbolic_expression(d,gr,pr,MultiexpMode::Reference);tr.rexp_residual_reference=evaluate_symbolic_expression(r,gr,pr,MultiexpMode::Reference);}tr.dory_residual_pippenger=evaluate_symbolic_expression(d,gr,pr,MultiexpMode::Pippenger);tr.rexp_residual_pippenger=evaluate_symbolic_expression(r,gr,pr,MultiexpMode::Pippenger);GT one;one.setOne();tr.dory_accepted=tr.dory_residual_pippenger==one;tr.rexp_accepted=tr.rexp_residual_pippenger==one;tr.accepted=tr.dory_accepted&&tr.rexp_accepted;tr.gt_multiexp_calls=2;tr.pairing_product_calls=2;return tr;}catch(...){return DeferredVerificationTrace{};}}
-DeferredVerificationTrace verify_deferred_with_trace(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v){if(!validate_precomputation(c,p))return {};return verify_impl(c,p,s,v,true,nullptr,false);}
-bool verify_deferred(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v){return validate_precomputation(c,p)&&verify_impl(c,p,s,v,false,nullptr,false).accepted;}
-CombinedVerificationTrace verify_deferred_combined_with_trace(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v){CombinedVerificationTrace z;verify_impl(c,p,s,v,true,&z,false);return z;}
-bool prepare_validated_verification_inputs(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v,ValidatedVerificationInputs&out){out={};try{if(!validate(c,p,s,v)||!validate_precomputation(c,p))return false;out={&c,&p,&s,&v};return true;}catch(...){out={};return false;}}
-bool verify_online(const ValidatedVerificationInputs&i){if(!i.crs||!i.precomp||!i.statement||!i.proof)return false;CombinedVerificationTrace z;return verify_impl(*i.crs,*i.precomp,*i.statement,*i.proof,false,&z,true).accepted;}
-CombinedVerificationTrace verify_online_with_trace(const ValidatedVerificationInputs&i){CombinedVerificationTrace z;if(!i.crs||!i.precomp||!i.statement||!i.proof)return z;verify_impl(*i.crs,*i.precomp,*i.statement,*i.proof,false,&z,true);return z;}
-bool verify_deferred_combined(const VmeIbfCRS&c,const VmeIbfPrecomputation&p,const VmeIbfStatement&s,const VmeIbfProof&v){ValidatedVerificationInputs i;if(!prepare_validated_verification_inputs(c,p,s,v,i))return false;return verify_online(i);}
+
+DeferredVerificationTrace evaluate_deferred(
+    const VmeIbfCRS& crs,
+    const VmeIbfPrecomputation& precomputation,
+    const VmeIbfStatement& statement,
+    const VmeIbfProof& proof,
+    bool audit_reference) {
+    DeferredVerificationTrace trace;
+    internal::VerificationEquations equations;
+    if (!internal::build_verification_equations(
+            crs, precomputation, statement, proof, equations)) return trace;
+    trace.rho = equations.challenges.rho;
+    trace.beta = equations.challenges.beta;
+    trace.alpha = equations.challenges.alpha;
+    trace.gamma = equations.challenges.gamma;
+    trace.epsilon = equations.challenges.epsilon;
+    trace.dory_gt_terms_before_normalize = equations.dory.gt_terms.size();
+    trace.rexp_gt_terms_before_normalize = equations.rexp.gt_terms.size();
+    normalize(equations.dory);
+    normalize(equations.rexp);
+    trace.dory_gt_terms_after_normalize = equations.dory.gt_terms.size();
+    trace.rexp_gt_terms_after_normalize = equations.rexp.gt_terms.size();
+    trace.dory_pairing_terms = equations.dory.pairing_terms.size();
+    trace.rexp_pairing_terms = equations.rexp.pairing_terms.size();
+    const auto resolver = resolvers(
+        crs, precomputation, statement, proof, equations);
+    if (audit_reference) {
+        trace.dory_residual_reference = evaluate_symbolic_expression(
+            equations.dory, resolver.gt, resolver.pairing,
+            MultiexpMode::Reference);
+        trace.rexp_residual_reference = evaluate_symbolic_expression(
+            equations.rexp, resolver.gt, resolver.pairing,
+            MultiexpMode::Reference);
+    }
+    trace.dory_residual_pippenger = evaluate_symbolic_expression(
+        equations.dory, resolver.gt, resolver.pairing, MultiexpMode::Pippenger);
+    trace.rexp_residual_pippenger = evaluate_symbolic_expression(
+        equations.rexp, resolver.gt, resolver.pairing, MultiexpMode::Pippenger);
+    GT one;
+    one.setOne();
+    trace.dory_accepted = trace.dory_residual_pippenger == one;
+    trace.rexp_accepted = trace.rexp_residual_pippenger == one;
+    trace.accepted = trace.dory_accepted && trace.rexp_accepted;
+    trace.gt_multiexp_calls = 2;
+    trace.pairing_product_calls = 2;
+    return trace;
 }
+
+CombinedVerificationTrace evaluate_combined(
+    const VmeIbfCRS& crs,
+    const VmeIbfPrecomputation& precomputation,
+    const VmeIbfStatement& statement,
+    const VmeIbfProof& proof,
+    bool audit_reference) {
+    CombinedVerificationTrace trace;
+    const auto total_start = internal::Clock::now();
+    internal::VerificationEquations equations;
+    if (!internal::build_verification_equations(
+            crs, precomputation, statement, proof, equations)) return trace;
+    const auto resolver = resolvers(
+        crs, precomputation, statement, proof, equations);
+    Transcript transcript = Transcript::resume(equations.challenges.after_epsilon);
+    const Fr eta = internal::derive_eta(transcript, crs.d);
+    auto combined = equations.dory;
+    multiply_in_place(combined, powered(equations.rexp, eta));
+    trace.gt_terms_before_normalize = combined.gt_terms.size();
+    trace.pairing_terms_before_normalize = combined.pairing_terms.size();
+    const auto before_normalize = internal::Clock::now();
+    normalize(combined);
+    const auto after_normalize = internal::Clock::now();
+    trace.gt_terms_after_normalize = combined.gt_terms.size();
+    trace.pairing_terms_after_normalize = combined.pairing_terms.size();
+    trace.rho = equations.challenges.rho;
+    trace.beta = equations.challenges.beta;
+    trace.alpha = equations.challenges.alpha;
+    trace.gamma = equations.challenges.gamma;
+    trace.epsilon = equations.challenges.epsilon;
+    trace.eta = eta;
+    trace.final_transcript_digest = transcript.digest();
+    if (audit_reference) {
+        trace.evaluated_dory_residual = evaluate_symbolic_expression(
+            equations.dory, resolver.gt, resolver.pairing,
+            MultiexpMode::Reference);
+        trace.evaluated_rexp_residual = evaluate_symbolic_expression(
+            equations.rexp, resolver.gt, resolver.pairing,
+            MultiexpMode::Reference);
+        trace.evaluated_combined_reference = evaluate_symbolic_expression(
+            combined, resolver.gt, resolver.pairing, MultiexpMode::Reference);
+    }
+    PairingProductStats stats;
+    trace.evaluated_combined_residual = evaluate_symbolic_expression(
+        combined, resolver.gt, resolver.pairing, MultiexpMode::Pippenger,
+        nullptr, &stats);
+    const auto after_evaluation = internal::Clock::now();
+    GT one;
+    one.setOne();
+    trace.accepted = trace.evaluated_combined_residual == one;
+    trace.coalesced_pairing_terms = stats.coalesced_pairing_terms;
+    trace.miller_loop_batches = stats.miller_loop_batches;
+    trace.miller_loop_terms = stats.miller_loop_terms;
+    trace.final_exponentiations = stats.final_exponentiations;
+    trace.gt_msm_ms = stats.gt_msm_ms;
+    trace.multi_pairing_ms = stats.multi_pairing_ms;
+    trace.gt_multiexp_calls = 1;
+    trace.pairing_product_calls = 1;
+    trace.intermediate_gt_exponentiations = 0;
+    trace.underlying_pairings = combined.pairing_terms.size();
+    trace.transcript_ms = equations.timings.transcript_ms;
+    trace.batch_inversion_ms = equations.timings.batch_inversion_ms;
+    trace.recurrence_ms = equations.timings.recurrence_ms;
+    trace.terminal_assembly_ms = equations.timings.terminal_assembly_ms;
+    trace.combined_normalize_ms = internal::milliseconds(
+        before_normalize, after_normalize);
+    trace.gt_msm_pairing_ms = internal::milliseconds(
+        after_normalize, after_evaluation);
+    trace.total_ms = internal::milliseconds(total_start, internal::Clock::now());
+    return trace;
+}
+
+} // namespace
+
+DeferredVerificationTrace verify_deferred_with_trace(
+    const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
+    const VmeIbfStatement& statement, const VmeIbfProof& proof) {
+    if (!internal::validate_verification_objects(
+            crs, precomputation, statement, proof, true)) return {};
+    return evaluate_deferred(crs, precomputation, statement, proof, true);
+}
+
+bool verify_deferred(const VmeIbfCRS& crs,
+                     const VmeIbfPrecomputation& precomputation,
+                     const VmeIbfStatement& statement,
+                     const VmeIbfProof& proof) {
+    if (!internal::validate_verification_objects(
+            crs, precomputation, statement, proof, true)) return false;
+    return evaluate_deferred(crs, precomputation, statement, proof, false).accepted;
+}
+
+CombinedVerificationTrace verify_deferred_combined_with_trace(
+    const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
+    const VmeIbfStatement& statement, const VmeIbfProof& proof) {
+    if (!internal::validate_verification_objects(
+            crs, precomputation, statement, proof, true)) return {};
+    return evaluate_combined(crs, precomputation, statement, proof, true);
+}
+
+std::optional<ValidatedVerificationInputs> validate_verification_inputs(
+    const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
+    const VmeIbfStatement& statement, const VmeIbfProof& proof) {
+    if (!internal::validate_verification_objects(
+            crs, precomputation, statement, proof, true)) return std::nullopt;
+    return ValidatedVerificationInputs(crs, precomputation, statement, proof);
+}
+
+bool verify_online(const ValidatedVerificationInputs& inputs) {
+    return evaluate_combined(inputs.crs(), inputs.precomputation(),
+                             inputs.statement(), inputs.proof(), false).accepted;
+}
+
+CombinedVerificationTrace verify_online_with_trace(
+    const ValidatedVerificationInputs& inputs) {
+    return evaluate_combined(inputs.crs(), inputs.precomputation(),
+                             inputs.statement(), inputs.proof(), false);
+}
+
+bool verify_deferred_combined(
+    const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
+    const VmeIbfStatement& statement, const VmeIbfProof& proof) {
+    const auto inputs = validate_verification_inputs(
+        crs, precomputation, statement, proof);
+    return inputs && verify_online(*inputs);
+}
+
+} // namespace vme_ibf
