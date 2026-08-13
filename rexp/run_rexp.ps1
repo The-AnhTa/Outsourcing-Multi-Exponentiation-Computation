@@ -49,7 +49,7 @@ if ($buildExitCode -ne 0) {
 
 $output = & $executable $d 2>&1
 if ($LASTEXITCODE -ne 0) {
-    throw "Rexp protocol one failed."
+    throw "Rexp protocol one failed: $($output -join [Environment]::NewLine)"
 }
 
 $output

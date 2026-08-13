@@ -1,4 +1,5 @@
 #include "rexp/dory_setup.hpp"
+#include "internal/crypto.hpp"
 
 #include <mcl/fp.hpp>
 
@@ -14,7 +15,15 @@
 namespace rexp {
 namespace {
 
-using Bytes = std::vector<std::uint8_t>;
+using internal::Bytes;
+using internal::append;
+using internal::append_fixed_element;
+using internal::append_frame;
+using internal::append_framed_element;
+using internal::append_u64_be;
+using internal::pairing_product;
+using internal::serialize_element;
+using internal::sha256;
 
 constexpr std::string_view kCrsDomain = "DORY-CRS-BN254-V1";
 constexpr std::string_view kCurve = "BN254";
@@ -24,69 +33,6 @@ constexpr std::string_view kG2Domain = "REXP-CRS-G2-V1";
 constexpr std::string_view kCrsWire = "DORY-CRS-WIRE-BN254-V1";
 constexpr std::string_view kPrecompWire = "DORY-PRECOMP-WIRE-BN254-V1";
 constexpr std::string_view kStatementWire = "DORY-STATEMENT-WIRE-BN254-V1";
-
-void append(Bytes& out, const void* data, std::size_t size) {
-    const auto* begin = static_cast<const std::uint8_t*>(data);
-    out.insert(out.end(), begin, begin + size);
-}
-
-void append(Bytes& out, std::string_view value) {
-    append(out, value.data(), value.size());
-}
-
-void append_u64_be(Bytes& out, std::uint64_t value) {
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        out.push_back(static_cast<std::uint8_t>(value >> shift));
-    }
-}
-
-void append_frame(Bytes& out, const void* data, std::size_t size) {
-    append_u64_be(out, static_cast<std::uint64_t>(size));
-    append(out, data, size);
-}
-
-void append_frame(Bytes& out, std::string_view value) {
-    append_frame(out, value.data(), value.size());
-}
-
-template<class T>
-Bytes serialize_element(const T& value) {
-
-    Bytes out(2048);
-    const std::size_t written = value.serialize(out.data(), out.size());
-    if (written == 0) throw std::runtime_error("mcl element serialization failed");
-    out.resize(written);
-    return out;
-}
-
-template<class T>
-void append_framed_element(Bytes& out, const T& value) {
-    const Bytes encoded = serialize_element(value);
-    append_frame(out, encoded.data(), encoded.size());
-}
-
-template<class T>
-void append_fixed_element(
-    Bytes& out,
-    const T& value,
-    std::size_t expected_size,
-    const char* description) {
-    const Bytes encoded = serialize_element(value);
-    if (encoded.size() != expected_size) {
-        throw std::runtime_error(
-            std::string("unexpected fixed-width ") + description + " encoding");
-    }
-    append(out, encoded.data(), encoded.size());
-}
-
-Digest sha256(const Bytes& input) {
-    Digest out{};
-    const std::uint32_t written = mcl::fp::sha256(
-        out.data(), static_cast<std::uint32_t>(out.size()),
-        input.data(), static_cast<std::uint32_t>(input.size()));
-    if (written != out.size()) throw std::runtime_error("SHA-256 failed");
-    return out;
-}
 
 G1 hash_g1(std::string_view domain, std::string_view seed, std::size_t index) {
     Bytes message;
@@ -113,29 +59,6 @@ void require_point(const Point& point, const char* name) {
     if (point.isZero() || !point.isValid() || !point.isValidOrder()) {
         throw std::runtime_error(std::string("invalid generated ") + name);
     }
-}
-
-GT pairing_product(
-    const std::vector<G1>& left,
-    std::size_t left_offset,
-    const std::vector<G2>& right,
-    std::size_t right_offset,
-    std::size_t count) {
-    if (left_offset + count > left.size() || right_offset + count > right.size()) {
-        throw std::invalid_argument("pairing-product slice is out of range");
-    }
-    if (count == 0) {
-        GT one;
-        one.setOne();
-        return one;
-    }
-    std::vector<G1> a(left.begin() + left_offset, left.begin() + left_offset + count);
-    std::vector<G2> b(right.begin() + right_offset, right.begin() + right_offset + count);
-    GT miller;
-    mcl::bn::millerLoopVec(miller, a.data(), b.data(), count, true);
-    GT result;
-    mcl::bn::finalExp(result, miller);
-    return result;
 }
 
 Fr default_scalar() {
@@ -285,47 +208,13 @@ BatchSetupResult SetupDoryBatch(
     std::size_t batch_size,
     std::string_view crs_seed,
     NonzeroScalarSampler sampler) {
-    initialize();
-    validate_d(d);
     if (batch_size == 0) {
         throw std::invalid_argument("batch size B must be at least one");
     }
-    const std::size_t n = std::size_t{1} << d;
 
     BatchSetupResult out;
-    out.crs.d = d;
-    out.crs.n = n;
-    out.crs.Gamma.reserve(n);
-    out.crs.Lambda.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        G1 gamma = hash_g1(kG1Domain, crs_seed, i);
-        G2 lambda = hash_g2(kG2Domain, crs_seed, i);
-        require_point(gamma, "Gamma");
-        require_point(lambda, "Lambda");
-        out.crs.Gamma.push_back(gamma);
-        out.crs.Lambda.push_back(lambda);
-    }
-    out.crs.digest = ComputeDoryCRSDigest(out.crs);
-
-    out.precomp.X.reserve(d + 1);
-    for (std::size_t k = 0; k <= d; ++k) {
-        const std::size_t m = n >> k;
-        out.precomp.X.push_back(pairing_product(
-            out.crs.Gamma, 0, out.crs.Lambda, 0, m));
-        out.precomp.pairing_product_terms += m;
-    }
-    out.precomp.Delta1R.reserve(d);
-    out.precomp.Delta2R.reserve(d);
-    for (std::size_t k = 0; k < d; ++k) {
-        const std::size_t m = n >> k;
-        const std::size_t h = m / 2;
-        out.precomp.Delta1R.push_back(pairing_product(
-            out.crs.Gamma, h, out.crs.Lambda, 0, h));
-        out.precomp.Delta2R.push_back(pairing_product(
-            out.crs.Gamma, 0, out.crs.Lambda, h, h));
-        out.precomp.pairing_product_terms += 2 * h;
-    }
-    out.precomp.crs_digest = out.crs.digest;
+    out.crs = GenerateDoryCRS(d, crs_seed);
+    out.precomp = PrepareDoryPrecomputation(out.crs);
 
     out.statements.reserve(batch_size);
     out.witnesses.reserve(batch_size);

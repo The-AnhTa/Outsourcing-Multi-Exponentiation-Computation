@@ -43,7 +43,11 @@ int main(int argc, char** argv) {
                   << "Proof size: " << proof_bytes << " bytes\n"
                   << "CRS size: " << crs_bytes << " bytes\n";
         return EXIT_SUCCESS;
+    } catch (const std::exception& error) {
+        std::cerr << "run_rexp failed: " << error.what() << '\n';
+        return EXIT_FAILURE;
     } catch (...) {
+        std::cerr << "run_rexp failed: unknown error\n";
         return EXIT_FAILURE;
     }
 }

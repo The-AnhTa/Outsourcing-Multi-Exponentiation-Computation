@@ -39,16 +39,16 @@ struct VerifyAuditTrace {
 
 class PreparedVerifier {
 public:
-    const DoryCRS& crs() const { return *crs_; }
-    const DoryPrecomputation& precomp() const { return *precomp_; }
+    const DoryCRS& crs() const { return crs_; }
+    const DoryPrecomputation& precomp() const { return precomp_; }
 
 private:
     PreparedVerifier(
         const DoryCRS& crs,
         const DoryPrecomputation& precomp)
-        : crs_(&crs), precomp_(&precomp) {}
-    const DoryCRS* crs_;
-    const DoryPrecomputation* precomp_;
+        : crs_(crs), precomp_(precomp) {}
+    DoryCRS crs_;
+    DoryPrecomputation precomp_;
     friend std::optional<PreparedVerifier> PrepareVerifier(
         const DoryCRS&, const DoryPrecomputation&);
 };
