@@ -6,7 +6,7 @@
 namespace vme_ibf {
 inline constexpr std::size_t kMaxSerializedDimension = 20;
 struct CanonicalElementSizes {std::size_t fr_bytes{},g1_bytes{},g2_bytes{},gt_bytes{};};
-enum class DecodeError {None,WrongMagic,UnsupportedVersion,WrongCurve,InvalidDimension,SizeOverflow,WrongLength,Truncated,TrailingBytes,InvalidFr,InvalidG1,InvalidG2,InvalidGT,NonCanonicalEncoding,InvalidSubgroup,IdentityNotAllowed,CrsDigestMismatch};
+enum class DecodeError {None,WrongMagic,UnsupportedVersion,WrongCurve,InvalidDimension,SizeOverflow,WrongLength,Truncated,TrailingBytes,InvalidFr,InvalidG1,InvalidG2,InvalidGT,NonCanonicalEncoding,InvalidSubgroup,IdentityNotAllowed,CrsDigestMismatch,InvalidCrs};
 
 CanonicalElementSizes canonical_element_sizes();
 Bytes serialize_fr(const Fr&); Bytes serialize_g1(const G1&); Bytes serialize_g2(const G2&); Bytes serialize_gt(const GT&);

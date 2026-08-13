@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(vme_bf_g2 LANGUAGES CXX)
+project(vmemulti VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,10 +27,23 @@ if(WIN32 AND TARGET mcl)
 endif()
 
 add_library(vme_ibf
-  src/group_utils.cpp src/transcript.cpp src/setup.cpp src/phase1.cpp src/phase2.cpp
-  src/proof.cpp src/verify_reference.cpp src/vmemulti.cpp)
-target_sources(vme_ibf PRIVATE src/symbolic_gt.cpp src/batch_inversion.cpp
-  src/gt_multiexp.cpp src/verify_deferred.cpp src/serialization.cpp)
+  src/batch_inversion.cpp
+  src/group_utils.cpp
+  src/gt_multiexp.cpp
+  src/internal/crypto.cpp
+  src/internal/protocol.cpp
+  src/internal/verification.cpp
+  src/phase1.cpp
+  src/phase2.cpp
+  src/proof.cpp
+  src/serialization.cpp
+  src/setup.cpp
+  src/symbolic_gt.cpp
+  src/transcript.cpp
+  src/validation.cpp
+  src/verify_deferred.cpp
+  src/verify_reference.cpp
+  src/vmemulti.cpp)
 target_include_directories(vme_ibf PUBLIC include)
 target_link_libraries(vme_ibf PUBLIC mcl::mcl_st)
 target_compile_features(vme_ibf PUBLIC cxx_std_20)
@@ -42,3 +55,20 @@ endif()
 
 add_executable(run_vmemulti bench/run_vmemulti.cpp)
 target_link_libraries(run_vmemulti PRIVATE vme_ibf)
+if(MSVC)
+  target_compile_options(run_vmemulti PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(run_vmemulti PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(vmemulti_tests tests/vmemulti_tests.cpp)
+  target_link_libraries(vmemulti_tests PRIVATE vme_ibf)
+  if(MSVC)
+    target_compile_options(vmemulti_tests PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(vmemulti_tests PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME vmemulti_tests COMMAND vmemulti_tests)
+endif()
