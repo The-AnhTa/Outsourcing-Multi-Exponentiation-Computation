@@ -2,19 +2,21 @@
 #include "rexpbf/pairing.hpp"
 #include "rexpbf/serialization.hpp"
 #include "rexpbf/transcript.hpp"
+#include "internal/crypto.hpp"
+#include "internal/protocol.hpp"
 #include <stdexcept>
 
 namespace rexpbf {
 namespace {
-Fr inv(const Fr& x) { if (x.isZero()) throw std::invalid_argument("zero challenge"); Fr z; Fr::inv(z,x); return z; }
-Fr mul(const Fr& a,const Fr& b) { Fr z; Fr::mul(z,a,b); return z; }
-G1 scale(const G1& p,const Fr& x) { G1 z; G1::mul(z,p,x); return z; }
-G2 scale(const G2& p,const Fr& x) { G2 z; G2::mul(z,p,x); return z; }
-G1 add(const G1&a,const G1&b) { G1 z; G1::add(z,a,b); return z; }
-G2 add(const G2&a,const G2&b) { G2 z; G2::add(z,a,b); return z; }
-GT power(const GT&a,const Fr&x) { GT z; GT::pow(z,a,x); return z; }
-GT product(const GT&a,const GT&b) { GT z; GT::mul(z,a,b); return z; }
-GT products(std::initializer_list<GT> xs) { GT z; z.setOne(); for(const auto& x:xs) z=product(z,x); return z; }
+Fr inv(const Fr& x) { return internal::fr_inverse_nonzero(x); }
+Fr mul(const Fr& a,const Fr& b) { return internal::fr_multiply(a,b); }
+G1 scale(const G1& p,const Fr& x) { return internal::g1_multiply(p,x); }
+G2 scale(const G2& p,const Fr& x) { return internal::g2_multiply(p,x); }
+G1 add(const G1&a,const G1&b) { return internal::g1_add(a,b); }
+G2 add(const G2&a,const G2&b) { return internal::g2_add(a,b); }
+GT power(const GT&a,const Fr&x) { return internal::gt_power(a,x); }
+GT product(const GT&a,const GT&b) { return internal::gt_multiply(a,b); }
+GT products(std::initializer_list<GT> xs) { return internal::gt_product(xs); }
 std::vector<G1> fold_h(std::span<const G1> h,const Fr& rho) {
     const auto n=h.size()/2; std::vector<G1> out; out.reserve(n);
     for(std::size_t i=0;i<n;++i) out.push_back(add(h[i],scale(h[n+i],rho))); return out;
@@ -23,22 +25,9 @@ std::vector<G2> fresh_theta(std::span<const G2> l,const Fr& rho_inv) {
     const auto n=l.size()/2; std::vector<G2> out; out.reserve(n);
     for(std::size_t i=0;i<n;++i) out.push_back(add(l[i],scale(l[n+i],rho_inv))); return out;
 }
-void init_transcript(Transcript& tr,const CRS& c,const Statement&s) {
-    tr.append_bytes("crs-digest",c.digest); tr.append_bytes("statement-digest",s.digest);
-    tr.append_u64("d",c.d); tr.append_u64("n",c.n);
-}
-void metadata(Transcript& tr,std::string_view phase,std::size_t level,std::size_t round,
-              std::size_t current,std::size_t next) {
-    tr.append_bytes("phase",{reinterpret_cast<const std::uint8_t*>(phase.data()),phase.size()});
-    tr.append_u64("level",level); tr.append_u64("outer-round",round);
-    tr.append_u64("current-dimension",current); tr.append_u64("next-dimension",next);
-}
-Fr initial_rho(Transcript& tr,const CRS& c) {
-    metadata(tr,"REXP-BF-G1-INITIAL-REXP-V1",1,0,c.n,c.n/2);
-    return tr.challenge_nonzero_fr("REXP-BF-G1-RHO-V1",0);
-}
 void validate_inputs(const CRS& c,const Precomputation&p,const Statement&s,const ProverInput&i) {
-    if(!validate_crs(c)||!validate_precomputation_shape(c,p)||!validate_statement_shape(c,s))
+    if(!validate_crs(c)||!validate_precomputation_shape(c,p)||!validate_precomputation_elements(p)
+       ||!validate_statement_shape(c,s)||!validate_statement_elements(s)||!validate_statement_digest(c,s))
         throw std::invalid_argument("invalid Setup input");
     if(p.crs_digest!=c.digest||s.crs_digest!=c.digest) throw std::invalid_argument("CRS digest mismatch");
     if(i.h!=s.h) throw std::invalid_argument("prover input differs from public statement");
@@ -47,12 +36,12 @@ void validate_inputs(const CRS& c,const Precomputation&p,const Statement&s,const
 
 ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const ProverInput&pi) {
     validate_inputs(c,p,s,pi);
-    Transcript tr("REXP-BF-G1-FS-v1"); init_transcript(tr,c,s);
+    Transcript tr(internal::transcript_domain); internal::initialize_protocol_transcript(tr,c,s);
     ProveResult result; result.r.resize(c.d); result.proof.steps.reserve(c.d-1);
     std::vector<G1> h_current=s.h;
     GT outer_d1=s.d1_initial, ad0,ad1,ad2;
     std::vector<G1> aphi; std::vector<G2> atheta;
-    Fr rho=initial_rho(tr,c); result.r[c.d-1]=rho; Fr rho_inv=inv(rho);
+    Fr rho=internal::derive_initial_rho(tr,c); result.r[c.d-1]=rho; Fr rho_inv=inv(rho);
     auto h_next=fold_h(h_current,rho); auto theta=fresh_theta(lambda_level(c,0),rho_inv);
     ad0=products({outer_d1,power(s.e0,rho),power(s.f0,rho_inv)});
     ad1=product(s.t_left0,power(s.t_right0,rho));
@@ -66,7 +55,7 @@ ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const Pr
         auto th=std::span<const G2>(atheta);
         auto gn=gamma_level(c,t);
         auto ln=lambda_level(c,t);
-        metadata(tr,"REXP-BF-G1-DORY-FIRST-V1",t,j,m,half);
+        internal::append_round_metadata(tr,"REXP-BF-G1-DORY-FIRST-V1",t,j,m,half);
         step.dory_fold.d1_left=pairing_product(ph.first(half),ln);
         step.dory_fold.d1_right=pairing_product(ph.subspan(half),ln);
         step.dory_fold.d2_left=pairing_product(gn,th.first(half));
@@ -80,7 +69,7 @@ ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const Pr
         for(std::size_t i=0;i<m;++i) { pc.push_back(add(aphi[i],scale(gl[i],beta))); tc.push_back(add(atheta[i],scale(ll[i],beta_inv))); }
         step.dory_fold.w1=pairing_product(std::span<const G1>(pc).first(half),std::span<const G2>(tc).subspan(half));
         step.dory_fold.w2=pairing_product(std::span<const G1>(pc).subspan(half),std::span<const G2>(tc).first(half));
-        metadata(tr,"REXP-BF-G1-DORY-SECOND-V1",t,j,m,half);
+        internal::append_round_metadata(tr,"REXP-BF-G1-DORY-SECOND-V1",t,j,m,half);
         tr.append_gt("W1",step.dory_fold.w1);tr.append_gt("W2",step.dory_fold.w2);
         Fr alpha=tr.challenge_nonzero_fr("REXP-BF-G1-DORY-ALPHA-V1",ell),alpha_inv=inv(alpha);
         std::vector<G1> folded_phi;std::vector<G2> folded_theta;folded_phi.reserve(half);folded_theta.reserve(half);
@@ -97,7 +86,7 @@ ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const Pr
 
         auto hc=std::span<const G1>(h_current);
         auto lj=lambda_level(c,j);
-        metadata(tr,"REXP-BF-G1-REXP-ROUND-V1",t,j,m,half);
+        internal::append_round_metadata(tr,"REXP-BF-G1-REXP-ROUND-V1",t,j,m,half);
         step.rexp_round.e=pairing_product(hc.subspan(half),lj.first(half));
         step.rexp_round.f=pairing_product(hc.first(half),lj.subspan(half));
         step.rexp_round.t_left=pairing_product(hc.first(half),ln);
@@ -110,7 +99,7 @@ ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const Pr
         GT fresh1=product(step.rexp_round.t_left,power(step.rexp_round.t_right,rho));
         GT fresh2=product(p.x[t],power(p.delta2_right[j],rho_inv));
         step.u=product(pairing_product(folded_phi,ft),pairing_product(fresh_phi,folded_theta));
-        metadata(tr,"REXP-BF-G1-BATCH-V1",t,j,m,half);tr.append_gt("U",step.u);
+        internal::append_round_metadata(tr,"REXP-BF-G1-BATCH-V1",t,j,m,half);tr.append_gt("U",step.u);
         Fr gamma=tr.challenge_nonzero_fr("REXP-BF-G1-GAMMA-V1",t),gamma2=mul(gamma,gamma);
         ad0=products({power(fd0,gamma2),power(step.u,gamma),fresh0});
         ad1=product(power(fd1,gamma),fresh1);ad2=product(power(fd2,gamma),fresh2);
@@ -123,7 +112,7 @@ ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const Pr
     }
     if(aphi.size()!=1||atheta.size()!=1||h_current.size()!=1) throw std::logic_error("terminal dimension invariant failed");
     result.proof.phi_final=aphi[0];result.proof.theta_final=atheta[0];
-    metadata(tr,"REXP-BF-G1-DORY-FINAL-V1",c.d,c.d-1,1,1);
+    internal::append_round_metadata(tr,"REXP-BF-G1-DORY-FINAL-V1",c.d,c.d-1,1,1);
     tr.append_g1("phi_final",result.proof.phi_final);tr.append_g2("theta_final",result.proof.theta_final);
     (void)tr.challenge_nonzero_fr("REXP-BF-G1-DORY-EPSILON-V1",c.d);
     result.proof.r_final=h_current[0];
@@ -131,37 +120,4 @@ ProveResult prove(const CRS& c,const Precomputation&p,const Statement&s,const Pr
     return result;
 }
 
-ChallengeTrace replay_challenges(const CRS& c,const Statement&s,const Proof& proof,TranscriptMetrics* metrics,bool inputs_prevalidated) {
-    if((!inputs_prevalidated&&(!validate_crs(c)||!validate_statement_shape(c,s)))||proof.steps.size()!=c.d-1)
-        throw std::invalid_argument("invalid proof replay input");
-    Transcript tr("REXP-BF-G1-FS-v1",metrics);init_transcript(tr,c,s);ChallengeTrace out;
-    out.rho.push_back(initial_rho(tr,c));
-    for(std::size_t t=2;t<=c.d;++t) {
-        const auto& q=proof.steps[t-2];std::size_t m=c.n>>(t-1),h=m/2,j=t-1;
-        metadata(tr,"REXP-BF-G1-DORY-FIRST-V1",t,j,m,h);
-        tr.append_gt("D1Left",q.dory_fold.d1_left);tr.append_gt("D1Right",q.dory_fold.d1_right);
-        tr.append_gt("D2Left",q.dory_fold.d2_left);tr.append_gt("D2Right",q.dory_fold.d2_right);
-        out.beta.push_back(tr.challenge_nonzero_fr("REXP-BF-G1-DORY-BETA-V1",t-1));
-        metadata(tr,"REXP-BF-G1-DORY-SECOND-V1",t,j,m,h);tr.append_gt("W1",q.dory_fold.w1);tr.append_gt("W2",q.dory_fold.w2);
-        out.alpha.push_back(tr.challenge_nonzero_fr("REXP-BF-G1-DORY-ALPHA-V1",t-1));
-        metadata(tr,"REXP-BF-G1-REXP-ROUND-V1",t,j,m,h);tr.append_gt("E",q.rexp_round.e);tr.append_gt("F",q.rexp_round.f);
-        tr.append_gt("TLeft",q.rexp_round.t_left);tr.append_gt("TRight",q.rexp_round.t_right);
-        out.rho.push_back(tr.challenge_nonzero_fr("REXP-BF-G1-RHO-V1",j));
-        metadata(tr,"REXP-BF-G1-BATCH-V1",t,j,m,h);tr.append_gt("U",q.u);
-        out.gamma.push_back(tr.challenge_nonzero_fr("REXP-BF-G1-GAMMA-V1",t));
-    }
-    metadata(tr,"REXP-BF-G1-DORY-FINAL-V1",c.d,c.d-1,1,1);tr.append_g1("phi_final",proof.phi_final);tr.append_g2("theta_final",proof.theta_final);
-    out.epsilon=tr.challenge_nonzero_fr("REXP-BF-G1-DORY-EPSILON-V1",c.d);
-    tr.append_g1("R",proof.r_final);
-    out.final_digest=tr.digest();return out;
-}
-std::vector<std::uint8_t> serialize_proof_payload(const Proof& proof) {
-    std::vector<std::uint8_t> out;
-    auto gt=[&](const GT&x){auto b=serialize_gt(x);out.insert(out.end(),b.begin(),b.end());};
-    for(const auto&s:proof.steps){gt(s.dory_fold.d1_left);gt(s.dory_fold.d1_right);gt(s.dory_fold.d2_left);gt(s.dory_fold.d2_right);
-        gt(s.dory_fold.w1);gt(s.dory_fold.w2);gt(s.rexp_round.e);gt(s.rexp_round.f);gt(s.rexp_round.t_left);gt(s.rexp_round.t_right);gt(s.u);}
-    auto a=serialize_g1(proof.phi_final);out.insert(out.end(),a.begin(),a.end());
-    auto b=serialize_g2(proof.theta_final);out.insert(out.end(),b.begin(),b.end());
-    a=serialize_g1(proof.r_final);out.insert(out.end(),a.begin(),a.end());return out;
-}
 }

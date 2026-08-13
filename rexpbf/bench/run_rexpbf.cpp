@@ -30,11 +30,16 @@ int main(int argc, char** argv) {
         const auto prove_result =
             rexpbf::prove(instance.crs, instance.precomputation,
                           instance.statement, instance.prover_input);
+        const auto validated = rexpbf::validate_verification_inputs(
+            instance.crs, instance.precomputation, instance.statement,
+            prove_result.proof);
+        if (!validated) {
+            throw std::runtime_error("verification input validation failed");
+        }
 
         const auto verify_start = std::chrono::steady_clock::now();
         const bool accepted =
-            rexpbf::verify_online(instance.crs, instance.precomputation,
-                                  instance.statement, prove_result.proof);
+            rexpbf::verify_prevalidated(*validated);
         const auto verify_end = std::chrono::steady_clock::now();
         if (!accepted) {
             throw std::runtime_error("verification failed");
@@ -56,7 +61,8 @@ int main(int argc, char** argv) {
                   << "Proof size: " << proof_bytes << " bytes\n"
                   << "CRS size: " << crs_bytes << " bytes\n";
         return EXIT_SUCCESS;
-    } catch (...) {
+    } catch (const std::exception& error) {
+        std::cerr << "run_rexpbf: " << error.what() << '\n';
         return EXIT_FAILURE;
     }
 }

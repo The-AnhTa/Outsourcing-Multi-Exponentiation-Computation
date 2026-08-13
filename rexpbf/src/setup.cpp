@@ -1,9 +1,9 @@
 #include "rexpbf/setup.hpp"
 #include "rexpbf/pairing.hpp"
 #include "rexpbf/serialization.hpp"
+#include "internal/crypto.hpp"
 #include <algorithm>
 #include <chrono>
-#include <limits>
 #include <stdexcept>
 #include <string_view>
 
@@ -14,16 +14,6 @@ using Clock = std::chrono::steady_clock;
 double elapsed(Clock::time_point a, Clock::time_point b) {
     return std::chrono::duration<double, std::milli>(b-a).count();
 }
-void validate_d(std::size_t d) {
-    if (d == 0) throw std::invalid_argument("d must be at least one");
-    if (d >= std::numeric_limits<std::size_t>::digits)
-        throw std::invalid_argument("d overflows 1 << d");
-    const auto n = std::size_t{1} << d;
-    if (n > std::vector<G1>().max_size() || n > std::vector<G2>().max_size())
-        throw std::invalid_argument("d exceeds vector maximum size");
-    if (n > (std::numeric_limits<std::uint64_t>::max() - 3) / 4)
-        throw std::invalid_argument("d overflows pairing count");
-}
 Bytes derivation_message(std::string_view domain, std::span<const std::uint8_t> seed, std::size_t i) {
     Bytes out(reinterpret_cast<const std::uint8_t*>(domain.data()),
               reinterpret_cast<const std::uint8_t*>(domain.data()) + domain.size());
@@ -32,17 +22,15 @@ Bytes derivation_message(std::string_view domain, std::span<const std::uint8_t> 
     out.insert(out.end(), index.begin(), index.end());
     return out;
 }
-template<class P> void require_point(const P& p) {
-    if (p.isZero() || !p.isValid() || !p.isValidOrder())
-        throw std::runtime_error("hash-to-curve produced an invalid point");
-}
 G1 derive_g1(std::string_view domain, std::span<const std::uint8_t> seed, std::size_t i) {
     const auto msg = derivation_message(domain, seed, i);
-    G1 p; mcl::bn::hashAndMapToG1(p, msg.data(), msg.size()); require_point(p); return p;
+    G1 p; mcl::bn::hashAndMapToG1(p, msg.data(), msg.size());
+    internal::require_point(p, true, "derived G1 point"); return p;
 }
 G2 derive_g2(std::string_view domain, std::span<const std::uint8_t> seed, std::size_t i) {
     const auto msg = derivation_message(domain, seed, i);
-    G2 p; mcl::bn::hashAndMapToG2(p, msg.data(), msg.size()); require_point(p); return p;
+    G2 p; mcl::bn::hashAndMapToG2(p, msg.data(), msg.size());
+    internal::require_point(p, true, "derived G2 point"); return p;
 }
 bool digest_equal(const Digest32& a, const Digest32& b) { return a == b; }
 Precomputation make_precomputation(const CRS& crs) {
@@ -89,7 +77,7 @@ Statement make_statement(const CRS& crs, std::span<const std::uint8_t> seed, Set
 }
 SetupResult setup_impl(const SetupConfig& config, SetupBreakdown* profile) {
     auto total = Clock::now();
-    initialize_bn254(); validate_d(config.d);
+    initialize_bn254(); internal::validate_dimension(config.d);
     SetupResult out;
     out.crs.d = config.d; out.crs.n = std::size_t{1} << config.d;
     out.crs.gamma.reserve(out.crs.n); out.crs.lambda.reserve(out.crs.n);
@@ -105,8 +93,12 @@ SetupResult setup_impl(const SetupConfig& config, SetupBreakdown* profile) {
     if (profile) profile->precomputation_ms = elapsed(phase, Clock::now());
     out.statement = make_statement(out.crs, config.instance_seed, profile);
     out.prover_input.h = out.statement.h;
-    if (!validate_crs(out.crs) || !validate_precomputation_shape(out.crs, out.precomputation)
-        || !validate_statement_shape(out.crs, out.statement))
+    if (!validate_crs(out.crs)
+        || !validate_precomputation_shape(out.crs, out.precomputation)
+        || !validate_precomputation_elements(out.precomputation)
+        || !validate_statement_shape(out.crs, out.statement)
+        || !validate_statement_elements(out.statement)
+        || !validate_statement_digest(out.crs, out.statement))
         throw std::logic_error("Setup validation failed");
     if (profile) profile->total_ms = elapsed(total, Clock::now());
     return out;
@@ -128,35 +120,67 @@ SetupResult setup_with_breakdown(const SetupConfig& config, SetupBreakdown& brea
     breakdown = {}; return setup_impl(config, &breakdown);
 }
 bool validate_crs(const CRS& crs) {
+    return validate_crs_shape(crs) && validate_crs_points(crs)
+        && validate_crs_digest(crs);
+}
+bool validate_crs_shape(const CRS& crs) {
     try {
-        validate_d(crs.d);
-        if (crs.n != (std::size_t{1} << crs.d) || crs.gamma.size() != crs.n || crs.lambda.size() != crs.n)
-            return false;
-        for (const auto& p : crs.gamma) require_point(p);
-        for (const auto& p : crs.lambda) require_point(p);
-        return digest_equal(crs.digest, compute_crs_digest(crs));
+        internal::validate_dimension(crs.d);
+        return crs.n == (std::size_t{1} << crs.d)
+            && crs.gamma.size() == crs.n && crs.lambda.size() == crs.n;
     } catch (...) { return false; }
 }
+bool validate_crs_points(const CRS& crs) {
+    try {
+        for (const auto& p : crs.gamma)
+            internal::require_point(p, true, "CRS G1 point");
+        for (const auto& p : crs.lambda)
+            internal::require_point(p, true, "CRS G2 point");
+        return true;
+    } catch (...) { return false; }
+}
+bool validate_crs_digest(const CRS& crs) {
+    try { return digest_equal(crs.digest, compute_crs_digest(crs)); }
+    catch (...) { return false; }
+}
 bool validate_precomputation_shape(const CRS& c, const Precomputation& p) {
-    return validate_crs(c) && p.crs_digest == c.digest && p.x.size() == c.d + 1
+    return validate_crs_shape(c) && p.crs_digest == c.digest && p.x.size() == c.d + 1
         && p.delta1_right.size() == c.d && p.delta2_right.size() == c.d
         && p.pairing_terms == 4 * static_cast<std::uint64_t>(c.n) - 3;
 }
+bool validate_precomputation_elements(const Precomputation& p) {
+    const auto valid = [](const GT& value) { return mcl::bn::isValidGT(value); };
+    return std::all_of(p.x.begin(), p.x.end(), valid)
+        && std::all_of(p.delta1_right.begin(), p.delta1_right.end(), valid)
+        && std::all_of(p.delta2_right.begin(), p.delta2_right.end(), valid);
+}
 bool validate_statement_shape(const CRS& c, const Statement& s) {
+    return validate_crs_shape(c) && s.crs_digest == c.digest && s.h.size() == c.n
+        && s.pairing_terms == 3 * static_cast<std::uint64_t>(c.n);
+}
+bool validate_statement_elements(const Statement& s) {
     try {
-        return validate_crs(c) && s.crs_digest == c.digest && s.h.size() == c.n
-            && s.pairing_terms == 3 * static_cast<std::uint64_t>(c.n)
-            && s.digest == compute_statement_digest(c, s);
+        for (const auto& point : s.h)
+            internal::require_point(point, true, "statement G1 point");
+        return mcl::bn::isValidGT(s.d1_initial) && mcl::bn::isValidGT(s.e0)
+            && mcl::bn::isValidGT(s.f0) && mcl::bn::isValidGT(s.t_left0)
+            && mcl::bn::isValidGT(s.t_right0);
     } catch (...) { return false; }
 }
+bool validate_statement_digest(const CRS& c, const Statement& s) {
+    try { return s.digest == compute_statement_digest(c, s); }
+    catch (...) { return false; }
+}
 bool audit_precomputation(const CRS& c, const Precomputation& p) {
-    if (!validate_precomputation_shape(c, p)) return false;
+    if (!validate_crs(c) || !validate_precomputation_shape(c, p)
+        || !validate_precomputation_elements(p)) return false;
     const auto expected = make_precomputation(c);
     return expected.x == p.x && expected.delta1_right == p.delta1_right
         && expected.delta2_right == p.delta2_right;
 }
 bool audit_statement(const CRS& c, const Statement& s) {
-    if (!validate_statement_shape(c, s)) return false;
+    if (!validate_crs(c) || !validate_statement_shape(c, s)
+        || !validate_statement_elements(s) || !validate_statement_digest(c, s)) return false;
     const auto l = std::span<const G2>(c.lambda); const auto h = std::span<const G1>(s.h);
     const auto half = c.n / 2;
     return s.d1_initial == pairing_product(h, l)

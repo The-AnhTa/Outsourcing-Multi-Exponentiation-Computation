@@ -3,18 +3,6 @@
 #include <optional>
 
 namespace rexpbf {
-struct GTTerm { const GT* base; Fr scalar; };
-class GTExpression {
-public:
-    static GTExpression atom(const GT& base);
-    void multiply(const GTExpression& other);
-    void multiply_atom(const GT& base, const Fr& scalar);
-    void scale(const Fr& scalar);
-    std::size_t normalize();
-    const std::vector<GTTerm>& terms() const { return terms_; }
-private:
-    std::vector<GTTerm> terms_;
-};
 struct VerifyDiagnostics {
     std::size_t gt_terms_before_coalescing{};
     std::size_t gt_terms_after_coalescing{};
@@ -57,18 +45,21 @@ struct VerifyCoreBreakdown {
 };
 class ValidatedVerificationInputs {
 public:
-    const CRS& crs() const { return *crs_; }
-    const Precomputation& precomputation() const { return *precomputation_; }
-    const Statement& statement() const { return *statement_; }
-    const Proof& proof() const { return *proof_; }
+    const CRS& crs() const { return crs_; }
+    const Precomputation& precomputation() const { return precomputation_; }
+    const Statement& statement() const { return statement_; }
+    const Proof& proof() const { return proof_; }
 private:
-    ValidatedVerificationInputs(const CRS& c,const Precomputation& p,const Statement& s,const Proof& q)
-      :crs_(&c),precomputation_(&p),statement_(&s),proof_(&q){}
-    const CRS* crs_;const Precomputation* precomputation_;const Statement* statement_;const Proof* proof_;
+    ValidatedVerificationInputs(const CRS& crs, const Precomputation& precomputation,
+                                const Statement& statement, const Proof& proof)
+        : crs_(crs), precomputation_(precomputation),
+          statement_(statement), proof_(proof) {}
+    CRS crs_;
+    Precomputation precomputation_;
+    Statement statement_;
+    Proof proof_;
     friend std::optional<ValidatedVerificationInputs> validate_verification_inputs(
       const CRS&,const Precomputation&,const Statement&,const Proof&,ValidationBreakdown*);
-    friend bool verify_online(const CRS&,const Precomputation&,const Statement&,const Proof&);
-    friend bool verify_online_with_breakdown(const CRS&,const Precomputation&,const Statement&,const Proof&,VerifyCoreBreakdown&);
 };
 std::optional<ValidatedVerificationInputs> validate_verification_inputs(
     const CRS&,const Precomputation&,const Statement&,const Proof&,ValidationBreakdown* = nullptr);

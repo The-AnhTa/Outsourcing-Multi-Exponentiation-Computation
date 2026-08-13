@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(rexpbf_bn254 LANGUAGES CXX)
+project(rexpbf_bn254 VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,17 +23,24 @@ if(WIN32 AND TARGET mcl)
 endif()
 
 add_library(rexpbf
+  src/internal/crypto.cpp
+  src/internal/protocol.cpp
   src/serialization.cpp
   src/pairing.cpp
   src/setup.cpp
   src/transcript.cpp
+  src/proof.cpp
   src/prove.cpp
   src/gt_multiexp.cpp
+  src/validation.cpp
+  src/verify_reference.cpp
+  src/internal/symbolic.cpp
   src/verify.cpp)
 target_include_directories(rexpbf PUBLIC include)
+target_compile_features(rexpbf PUBLIC cxx_std_20)
 target_link_libraries(rexpbf PUBLIC mcl::mcl_st)
 if(MSVC)
-  target_compile_options(rexpbf PRIVATE /W4 /EHsc)
+  target_compile_options(rexpbf PRIVATE /W4 /permissive- /EHsc)
 else()
   target_compile_options(rexpbf PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -41,5 +48,17 @@ endif()
 add_executable(run_rexpbf bench/run_rexpbf.cpp)
 target_link_libraries(run_rexpbf PRIVATE rexpbf)
 if(MSVC)
-  target_compile_options(run_rexpbf PRIVATE /W4 /EHsc)
+  target_compile_options(run_rexpbf PRIVATE /W4 /permissive- /EHsc)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(rexpbf_tests tests/rexpbf_tests.cpp)
+  target_link_libraries(rexpbf_tests PRIVATE rexpbf)
+  if(MSVC)
+    target_compile_options(rexpbf_tests PRIVATE /W4 /permissive- /EHsc)
+  else()
+    target_compile_options(rexpbf_tests PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME rexpbf_tests COMMAND rexpbf_tests)
 endif()
