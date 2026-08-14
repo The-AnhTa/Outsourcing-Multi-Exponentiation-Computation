@@ -1,5 +1,7 @@
 #include "blsagg/serialization.hpp"
 #include "blsagg/transcript.hpp"
+#include "internal/crypto.hpp"
+#include "internal/validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,25 +14,33 @@ constexpr std::uint16_t kVersion=1;
 constexpr std::size_t kHeaderBytes=24;
 
 void seterr(DecodeError*e,DecodeError x){if(e)*e=x;}
-void raw(Bytes&o,std::span<const std::uint8_t>x){o.insert(o.end(),x.begin(),x.end());}
+void raw(Bytes&o,std::span<const std::uint8_t>x){internal::append_raw(o,x);}
 void u16(Bytes&o,std::uint16_t x){o.push_back(std::uint8_t(x>>8));o.push_back(std::uint8_t(x));}
 void u32(Bytes&o,std::uint32_t x){for(int s=24;s>=0;s-=8)o.push_back(std::uint8_t(x>>s));}
+std::uint64_t as_u64(std::size_t x){
+  if constexpr(sizeof(std::size_t)>sizeof(std::uint64_t))
+    if(x>std::numeric_limits<std::uint64_t>::max())throw std::overflow_error("wire length");
+  return static_cast<std::uint64_t>(x);
+}
 void u64(Bytes&o,std::uint64_t x){raw(o,encode_u64(x));}
-void frame(Bytes&o,std::span<const std::uint8_t>x){u64(o,x.size());raw(o,x);}
+void frame(Bytes&o,std::span<const std::uint8_t>x){u64(o,as_u64(x.size()));raw(o,x);}
 template<class T>void element(Bytes&o,const T&x){auto b=serialize(x);frame(o,b);}
 std::uint8_t mode_byte(AggregationMode m){return static_cast<std::uint8_t>(m);}
 
 Bytes wrap(const char magic[9],AggregationMode mode,std::size_t d,const Bytes&body){
   if(d>std::numeric_limits<std::uint32_t>::max())throw std::overflow_error("dimension");
-  Bytes o;o.insert(o.end(),magic,magic+8);u16(o,kVersion);o.push_back(mode_byte(mode));o.push_back(0);
-  u32(o,static_cast<std::uint32_t>(d));u64(o,body.size());raw(o,body);return o;
+  std::size_t wire_size{};
+  if(!internal::checked_add(kHeaderBytes,body.size(),wire_size))throw std::overflow_error("wire length");
+  Bytes o;o.reserve(wire_size);
+  o.insert(o.end(),magic,magic+8);u16(o,kVersion);o.push_back(mode_byte(mode));o.push_back(0);
+  u32(o,static_cast<std::uint32_t>(d));u64(o,as_u64(body.size()));raw(o,body);return o;
 }
 
 class Reader{
  public:
   Reader(std::span<const std::uint8_t>b,DecodeError*e):b_(b),e_(e){}
   bool bytes(std::size_t n,std::span<const std::uint8_t>&x){
-    if(n>b_.size()-pos_){fail(DecodeError::Truncated);return false;}x=b_.subspan(pos_,n);pos_+=n;return true;
+    if(pos_>b_.size()||n>b_.size()-pos_){fail(DecodeError::Truncated);return false;}x=b_.subspan(pos_,n);pos_+=n;return true;
   }
   bool u64v(std::uint64_t&x){std::span<const std::uint8_t>q;if(!bytes(8,q))return false;x=0;for(auto c:q)x=(x<<8)|c;return true;}
   bool count(std::size_t&x){
@@ -45,7 +55,7 @@ class Reader{
     if(n>std::numeric_limits<std::size_t>::max()){fail(DecodeError::IntegerOverflow);return false;}
     return bytes(static_cast<std::size_t>(n),x);
   }
-  std::size_t remaining()const{return b_.size()-pos_;}
+  std::size_t remaining()const{return pos_<=b_.size()?b_.size()-pos_:0;}
   bool done(){if(pos_!=b_.size()){fail(DecodeError::TrailingBytes);return false;}return true;}
   void fail(DecodeError x){if(ok_){ok_=false;seterr(e_,x);}}
  private:
@@ -97,10 +107,12 @@ ValidatedProof::ValidatedProof(Proof proof,Digest parameter_digest,Digest wire_b
     :proof_(std::move(proof)),parameter_digest_(parameter_digest),wire_binding_(wire_binding){}
 
 Bytes serialize_public_parameters(const PublicParameters&p){
+  if(!internal::valid_public_parameters(p))throw std::invalid_argument("invalid public parameters");
   Bytes b;element(b,p.H);vec_elements(b,p.Gamma);vec_elements(b,p.Lambda);element(b,p.L);element(b,p.Lprime);frame(b,p.digest);
   return wrap("BLSAPP01",p.mode,p.d,b);
 }
 bool deserialize_public_parameters(std::span<const std::uint8_t>in,PublicParameters&o,DecodeError*e){
+  o={};seterr(e,DecodeError::None);
   try{
     std::size_t d=0;std::span<const std::uint8_t>body;if(!header(in,"BLSAPP01",AggregationMode::BasicDistinct,false,d,body,e))return false;
     const auto mode=static_cast<AggregationMode>(in[10]);if(!mode_valid(mode)){seterr(e,DecodeError::WrongMode);return false;}
@@ -108,51 +120,58 @@ bool deserialize_public_parameters(std::span<const std::uint8_t>in,PublicParamet
     if(!decode_element(r,p.H,DecodeError::InvalidG2,true)||!read_vec(r,p.Gamma,DecodeError::InvalidG1,true,k)||
        !read_vec(r,p.Lambda,DecodeError::InvalidG2,true,k)||!decode_element(r,p.L,DecodeError::InvalidG1,true)||
        !decode_element(r,p.Lprime,DecodeError::InvalidG2,true)||!digest(r,p.digest)||!r.done())return false;
-    try{(void)precompute(p);}catch(...){seterr(e,DecodeError::InvalidDigest);return false;}o=std::move(p);return true;
+    if(!internal::valid_public_parameters(p)){seterr(e,DecodeError::InvalidDigest);return false;}o=std::move(p);return true;
   }catch(...){seterr(e,DecodeError::InvalidShape);return false;}
 }
 
 Bytes serialize_precomputation(const PublicParameters&p,const Precomputation&a){
+  if(!internal::valid_precomputation(p,a))throw std::invalid_argument("invalid precomputation");
   Bytes b;frame(b,p.digest);frame(b,a.digest);u64(b,a.gamma_chain.size());for(const auto&v:a.gamma_chain)vec_elements(b,v);
   u64(b,a.lambda_chain.size());for(const auto&v:a.lambda_chain)vec_elements(b,v);
   target_vec(b,a.X);target_vec(b,a.delta1L);target_vec(b,a.delta1R);target_vec(b,a.delta2L);target_vec(b,a.delta2R);
   claims(b,a.g1_round0);claims(b,a.g2_round0);return wrap("BLSAUX01",p.mode,p.d,b);
 }
 bool deserialize_precomputation(std::span<const std::uint8_t>in,const PublicParameters&p,Precomputation&o,DecodeError*e){
+  o={};seterr(e,DecodeError::None);
   try{
+    if(!internal::valid_public_parameters(p)){seterr(e,DecodeError::InvalidDigest);return false;}
     std::size_t d=0;std::span<const std::uint8_t>body;if(!header(in,"BLSAUX01",p.mode,true,d,body,e))return false;
     if(d!=p.d){seterr(e,DecodeError::InvalidDimension);return false;}
-    Reader r(body,e);Digest pd{};Precomputation a;if(!digest(r,pd)||pd!=p.digest){seterr(e,DecodeError::InvalidDigest);return false;}if(!digest(r,a.digest))return false;
-    std::size_t levels;if(!r.count(levels)||levels!=p.d+1){seterr(e,DecodeError::InvalidShape);return false;}
+    Reader r(body,e);Digest pd{};Precomputation a;if(!digest(r,pd))return false;if(pd!=p.digest){seterr(e,DecodeError::InvalidDigest);return false;}if(!digest(r,a.digest))return false;
+    std::size_t levels;if(!r.count(levels))return false;if(levels!=p.d+1){seterr(e,DecodeError::InvalidShape);return false;}
     for(std::size_t j=0;j<levels;++j){std::vector<G1>v;if(!read_vec(r,v,DecodeError::InvalidG1,true,p.k>>j))return false;a.gamma_chain.push_back(std::move(v));}
-    if(!r.count(levels)||levels!=p.d+1){seterr(e,DecodeError::InvalidShape);return false;}
+    if(!r.count(levels))return false;if(levels!=p.d+1){seterr(e,DecodeError::InvalidShape);return false;}
     for(std::size_t j=0;j<levels;++j){std::vector<G2>v;if(!read_vec(r,v,DecodeError::InvalidG2,true,p.k>>j))return false;a.lambda_chain.push_back(std::move(v));}
     if(!read_vec(r,a.X,DecodeError::InvalidGT,false,p.d+1)||!read_vec(r,a.delta1L,DecodeError::InvalidGT,false,p.d)||
        !read_vec(r,a.delta1R,DecodeError::InvalidGT,false,p.d)||!read_vec(r,a.delta2L,DecodeError::InvalidGT,false,p.d)||
        !read_vec(r,a.delta2R,DecodeError::InvalidGT,false,p.d)||!read_claims(r,a.g1_round0)||!read_claims(r,a.g2_round0)||!r.done())return false;
-    const auto expected=precompute(p);if(serialize_precomputation(p,a)!=serialize_precomputation(p,expected)){seterr(e,DecodeError::InvalidDigest);return false;}
+    if(!internal::valid_precomputation(p,a)){seterr(e,DecodeError::InvalidDigest);return false;}
     o=std::move(a);return true;
   }catch(...){seterr(e,DecodeError::InvalidShape);return false;}
 }
 
 Bytes serialize_statement(const PublicParameters&p,const Statement&s){
+  if(!internal::valid_public_parameters(p)||!internal::valid_statement(p,s))throw std::invalid_argument("invalid statement");
   Bytes b;element(b,s.sigma_agg);u64(b,s.messages.size());for(const auto&m:s.messages)frame(b,m);vec_elements(b,s.public_keys);
   return wrap("BLSAST01",p.mode,p.d,b);
 }
 bool deserialize_statement(std::span<const std::uint8_t>in,const PublicParameters&p,Statement&o,DecodeError*e){
+  o={};seterr(e,DecodeError::None);
   try{
+    if(!internal::valid_public_parameters(p)){seterr(e,DecodeError::InvalidDigest);return false;}
     std::size_t d=0;std::span<const std::uint8_t>body;if(!header(in,"BLSAST01",p.mode,true,d,body,e))return false;
     if(d!=p.d){seterr(e,DecodeError::InvalidDimension);return false;}
     Reader r(body,e);Statement s;if(!decode_element(r,s.sigma_agg,DecodeError::InvalidG1,true))return false;
-    std::size_t n;if(!r.count(n)||n!=p.k){seterr(e,DecodeError::InvalidShape);return false;}s.messages.reserve(n);
+    std::size_t n;if(!r.count(n))return false;if(n!=p.k){seterr(e,DecodeError::InvalidShape);return false;}s.messages.reserve(n);
     for(std::size_t i=0;i<n;++i){std::span<const std::uint8_t>x;if(!r.framed(x))return false;s.messages.emplace_back(x.begin(),x.end());}
     if(!read_vec(r,s.public_keys,DecodeError::InvalidG2,true,p.k)||!r.done())return false;
-    if(p.mode==AggregationMode::BasicDistinct)for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j)if(s.messages[i]==s.messages[j]){seterr(e,DecodeError::InvalidShape);return false;}
+    if(!internal::valid_statement(p,s)){seterr(e,DecodeError::InvalidShape);return false;}
     o=std::move(s);return true;
   }catch(...){seterr(e,DecodeError::InvalidShape);return false;}
 }
 
 Bytes serialize_proof(const PublicParameters&p,const Proof&v){
+  if(!internal::valid_public_parameters(p)||!internal::valid_proof(p,v))throw std::invalid_argument("invalid proof");
   Bytes b;element(b,v.cm_M);element(b,v.cm_pk);element(b,v.T);
   u64(b,v.g1_rexp_claims.size());for(const auto&x:v.g1_rexp_claims)claims(b,x);
   u64(b,v.g2_rexp_claims.size());for(const auto&x:v.g2_rexp_claims)claims(b,x);
@@ -162,27 +181,28 @@ Bytes serialize_proof(const PublicParameters&p,const Proof&v){
   return wrap("BLSAPF01",p.mode,p.d,b);
 }
 bool deserialize_proof(std::span<const std::uint8_t>in,const PublicParameters&p,Proof&o,DecodeError*e){
+  o={};seterr(e,DecodeError::None);
   try{
+    if(!internal::valid_public_parameters(p)){seterr(e,DecodeError::InvalidDigest);return false;}
     std::size_t d=0;std::span<const std::uint8_t>body;if(!header(in,"BLSAPF01",p.mode,true,d,body,e))return false;
     if(d!=p.d){seterr(e,DecodeError::InvalidDimension);return false;}
     Reader r(body,e);Proof v;if(!decode_element(r,v.cm_M,DecodeError::InvalidGT,false)||!decode_element(r,v.cm_pk,DecodeError::InvalidGT,false)||!decode_element(r,v.T,DecodeError::InvalidGT,false))return false;
-    std::size_t n;if(!r.count(n)||n!=p.d-1){seterr(e,DecodeError::InvalidShape);return false;}for(std::size_t i=0;i<n;++i){RexpClaims c;if(!read_claims(r,c))return false;v.g1_rexp_claims.push_back(c);}
-    if(!r.count(n)||n!=p.d-1){seterr(e,DecodeError::InvalidShape);return false;}for(std::size_t i=0;i<n;++i){RexpClaims c;if(!read_claims(r,c))return false;v.g2_rexp_claims.push_back(c);}
+    std::size_t n;if(!r.count(n))return false;if(n!=p.d-1){seterr(e,DecodeError::InvalidShape);return false;}for(std::size_t i=0;i<n;++i){RexpClaims c;if(!read_claims(r,c))return false;v.g1_rexp_claims.push_back(c);}
+    if(!r.count(n))return false;if(n!=p.d-1){seterr(e,DecodeError::InvalidShape);return false;}for(std::size_t i=0;i<n;++i){RexpClaims c;if(!read_claims(r,c))return false;v.g2_rexp_claims.push_back(c);}
     if(!decode_element(r,v.R_Gamma,DecodeError::InvalidG1,false)||!decode_element(r,v.R_Lambda,DecodeError::InvalidG2,false)||
        !decode_element(r,v.U1,DecodeError::InvalidGT,false)||!decode_element(r,v.U2,DecodeError::InvalidGT,false))return false;
-    if(!r.count(n)||n!=p.d){seterr(e,DecodeError::InvalidShape);return false;}for(std::size_t i=0;i<n;++i){DoryStep x;if(!decode_element(r,x.A1L,DecodeError::InvalidGT,false)||!decode_element(r,x.A1R,DecodeError::InvalidGT,false)||!decode_element(r,x.A2L,DecodeError::InvalidGT,false)||!decode_element(r,x.A2R,DecodeError::InvalidGT,false)||!decode_element(r,x.W1,DecodeError::InvalidGT,false)||!decode_element(r,x.W2,DecodeError::InvalidGT,false))return false;v.dory_steps.push_back(x);}
+    if(!r.count(n))return false;if(n!=p.d){seterr(e,DecodeError::InvalidShape);return false;}for(std::size_t i=0;i<n;++i){DoryStep x;if(!decode_element(r,x.A1L,DecodeError::InvalidGT,false)||!decode_element(r,x.A1R,DecodeError::InvalidGT,false)||!decode_element(r,x.A2L,DecodeError::InvalidGT,false)||!decode_element(r,x.A2R,DecodeError::InvalidGT,false)||!decode_element(r,x.W1,DecodeError::InvalidGT,false)||!decode_element(r,x.W2,DecodeError::InvalidGT,false))return false;v.dory_steps.push_back(x);}
     if(!read_vec(r,v.insert_g1_u,DecodeError::InvalidGT,false,p.d)||!read_vec(r,v.insert_g2_u,DecodeError::InvalidGT,false,p.d)||
        !decode_element(r,v.Phi_final,DecodeError::InvalidG1,false)||!decode_element(r,v.Theta_final,DecodeError::InvalidG2,false)||!r.done())return false;
-    o=std::move(v);return true;
+    if(!internal::valid_proof(p,v)){seterr(e,DecodeError::InvalidShape);return false;}o=std::move(v);return true;
   }catch(...){seterr(e,DecodeError::InvalidShape);return false;}
 }
 
 std::optional<ValidatedProof> deserialize_and_validate_proof(
     std::span<const std::uint8_t>in,const PublicParameters&p,DecodeError*e){
   Proof proof;if(!deserialize_proof(in,p,proof,e))return std::nullopt;
-  Bytes binding_input;append_frame(binding_input,"bls-agg-bf/validated-proof/v1");
-  append_frame(binding_input,p.digest);append_frame(binding_input,in);
-  return ValidatedProof(std::move(proof),p.digest,sha256(binding_input));
+  const auto binding=internal::validated_proof_binding(p,proof);
+  return ValidatedProof(std::move(proof),p.digest,binding);
 }
 
 std::size_t proof_mathematical_payload_bytes(const Proof&p){return proof_payload_bytes(p);}

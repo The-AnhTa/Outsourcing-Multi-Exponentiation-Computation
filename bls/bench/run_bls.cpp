@@ -26,6 +26,13 @@ std::size_t dimension(const char* text) {
   return static_cast<std::size_t>(result);
 }
 
+AggregationMode aggregation_mode(const char* text) {
+  const std::string value(text);
+  if (value == "basic") return AggregationMode::BasicDistinct;
+  if (value == "augmented") return AggregationMode::Augmented;
+  throw std::invalid_argument("mode must be basic or augmented");
+}
+
 Statement make_statement(const PublicParameters& parameters) {
   Statement statement;
   std::vector<Fr> secret_keys;
@@ -56,17 +63,22 @@ Statement make_statement(const PublicParameters& parameters) {
 
 int main(int argc, char** argv) {
   try {
-    if (argc != 2)
-      throw std::invalid_argument("expected one dimension");
+    if (argc < 2 || argc > 3)
+      throw std::invalid_argument("usage: run_bls <d> [basic|augmented]");
     const std::size_t d = dimension(argv[1]);
+    const auto mode = argc == 3 ? aggregation_mode(argv[2])
+                                : AggregationMode::BasicDistinct;
+    const std::string mode_name =
+        mode == AggregationMode::BasicDistinct ? "basic" : "augmented";
 
     initialize();
     const auto setup_result = setup(
-        d, AggregationMode::BasicDistinct,
-        "bls-single-run/d=" + std::to_string(d));
+        d, mode, "bls-single-run/" + mode_name + "/d=" + std::to_string(d));
     const auto statement = make_statement(setup_result.pp);
+    const auto prove_start = Clock::now();
     const auto proof =
         prove(setup_result.pp, setup_result.aux, statement);
+    const auto prove_stop = Clock::now();
     const auto proof_wire =
         serialize_proof(setup_result.pp, proof);
     const auto crs_wire =
@@ -96,19 +108,26 @@ int main(int argc, char** argv) {
         std::chrono::duration<double, std::milli>(
             verify_stop - verify_start)
             .count();
+    const double proving_ms =
+        std::chrono::duration<double, std::milli>(prove_stop - prove_start)
+            .count();
     const double direct_verification_ms =
         std::chrono::duration<double, std::milli>(
             direct_stop - direct_start)
             .count();
 
     std::cout << std::fixed << std::setprecision(3)
+              << "Mode: " << mode_name << "\n"
+              << "Dimension: " << d << " (k=" << setup_result.pp.k << ")\n"
+              << "Proving time: " << proving_ms << " ms\n"
               << "Verification time: " << verification_ms << " ms\n"
               << "Proof size: " << proof_wire.size() << " bytes\n"
               << "CRS size: " << crs_wire.size() << " bytes\n"
               << "Direct BLS aggregate verification time: "
               << direct_verification_ms << " ms\n";
     return EXIT_SUCCESS;
-  } catch (...) {
+  } catch (const std::exception& error) {
+    std::cerr << "BLS benchmark failed: " << error.what() << '\n';
     return EXIT_FAILURE;
   }
 }

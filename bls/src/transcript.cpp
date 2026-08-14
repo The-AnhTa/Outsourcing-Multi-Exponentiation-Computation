@@ -1,4 +1,6 @@
 #include "blsagg/transcript.hpp"
+#include "internal/crypto.hpp"
+#include "internal/transcript_domains.hpp"
 
 #include <mcl/fp.hpp>
 
@@ -9,25 +11,6 @@
 #include <stdexcept>
 
 namespace blsagg {
-namespace {
-constexpr std::string_view kProtocol = "bls-agg-bf-nonzk-v1";
-constexpr std::string_view kCurve = "BN254/mcl-v3.00/e:G1xG2->GT";
-
-constexpr Digest kLimit = {0xde,0xd4,0x5b,0x0d,0x80,0x00,0x00,0x0a,
-  0x5d,0x39,0xd1,0x00,0x00,0x00,0x00,0x2f,0xfd,0xbd,0x00,0x00,
-  0x00,0x00,0x00,0x63,0xc6,0x00,0x00,0x00,0x00,0x00,0x00,0x4e};
-
-template<class T> Bytes encode(const T& x) {
-  Bytes out(2048);
-  const auto n = x.serialize(out.data(), out.size());
-  if (!n) throw std::runtime_error("mcl serialization failed");
-  out.resize(n);
-  return out;
-}
-void raw(Bytes& out, std::span<const std::uint8_t> x) {
-  out.insert(out.end(), x.begin(), x.end());
-}
-}
 
 void initialize() {
   static std::once_flag once;
@@ -39,8 +22,8 @@ Bytes encode_u64(std::uint64_t x) {
   return out;
 }
 void append_frame(Bytes& out, std::span<const std::uint8_t> x) {
-  raw(out, encode_u64(x.size()));
-  raw(out, x);
+  internal::append_raw(out, encode_u64(x.size()));
+  internal::append_raw(out, x);
 }
 void append_frame(Bytes& out, std::string_view x) {
   append_frame(out, {reinterpret_cast<const std::uint8_t*>(x.data()), x.size()});
@@ -53,17 +36,17 @@ Digest sha256(std::span<const std::uint8_t> in) {
     throw std::runtime_error("sha256 failed");
   return out;
 }
-Bytes serialize(const Fr& x) { return encode(x); }
-Bytes serialize(const G1& x) { return encode(x); }
-Bytes serialize(const G2& x) { return encode(x); }
-Bytes serialize(const GT& x) { return encode(x); }
+Bytes serialize(const Fr& x) { return internal::encode(x); }
+Bytes serialize(const G1& x) { return internal::encode(x); }
+Bytes serialize(const G2& x) { return internal::encode(x); }
+Bytes serialize(const GT& x) { return internal::encode(x); }
 
 Transcript::Transcript(const PublicParameters& pp, const Statement& s,
                        std::span<const G1> points) {
   const auto start=std::chrono::steady_clock::now();
   Bytes in;
-  append_frame(in, kProtocol);
-  append_frame(in, kCurve);
+  append_frame(in, internal::transcript_domain::protocol);
+  append_frame(in, internal::transcript_domain::curve);
   append_frame(in, pp.mode == AggregationMode::BasicDistinct ? "basic-distinct" : "augmented");
   append_frame(in, encode_u64(pp.k));
   append_frame(in, encode_u64(pp.d));
@@ -92,8 +75,8 @@ void Transcript::absorb(std::string_view label, std::uint64_t index,
                         std::span<const Bytes> fields) {
   const auto start=std::chrono::steady_clock::now();
   Bytes in;
-  append_frame(in, kProtocol);
-  append_frame(in, "absorb");
+  append_frame(in, internal::transcript_domain::protocol);
+  append_frame(in, internal::transcript_domain::absorb_operation);
   append_frame(in, label);
   append_frame(in, encode_u64(index));
   append_frame(in, state_);
@@ -109,14 +92,17 @@ Fr Transcript::challenge_nonzero(std::string_view label, std::uint64_t index) {
   for (std::uint64_t counter = 0;; ++counter) {
     const auto start=std::chrono::steady_clock::now();
     Bytes in;
-    append_frame(in, kProtocol);
-    append_frame(in, "challenge-nonzero");
+    append_frame(in, internal::transcript_domain::protocol);
+    append_frame(in, internal::transcript_domain::challenge_operation);
     append_frame(in, label);
     append_frame(in, encode_u64(index));
     append_frame(in, state_);
     append_frame(in, encode_u64(counter));
     const auto h = sha256(in);
-    if (!std::lexicographical_compare(h.begin(), h.end(), kLimit.begin(), kLimit.end())) continue;
+    if (!std::lexicographical_compare(
+            h.begin(), h.end(),
+            internal::transcript_domain::scalar_rejection_limit.begin(),
+            internal::transcript_domain::scalar_rejection_limit.end())) continue;
     Fr out;
     out.setBigEndianMod(h.data(), h.size());
     if (out.isZero()) continue;

@@ -7,9 +7,18 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-if ($RunArguments.Count -ne 2 -or
+if ($RunArguments.Count -notin @(2, 4) -or
     $RunArguments[0] -notin @("--d", "-d")) {
-    throw "Usage: .\run_bls.ps1 --d <dimension>"
+    throw "Usage: .\run_bls.ps1 --d <dimension> [--mode basic|augmented]"
+}
+
+$mode = "basic"
+if ($RunArguments.Count -eq 4) {
+    if ($RunArguments[2] -notin @("--mode", "-m") -or
+        $RunArguments[3] -notin @("basic", "augmented")) {
+        throw "The mode must be either basic or augmented."
+    }
+    $mode = $RunArguments[3]
 }
 
 $d = 0
@@ -19,7 +28,7 @@ if (-not [int]::TryParse($RunArguments[1], [ref]$d) -or
 }
 
 $projectRoot = $PSScriptRoot
-$buildDirectory = Join-Path $projectRoot "build"
+$buildDirectory = Join-Path $projectRoot "build-run"
 $executable = Join-Path $buildDirectory "run_bls.exe"
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe was not found." }
@@ -47,7 +56,7 @@ if ($buildExitCode -ne 0) {
     throw "The run_bls build failed: $($buildOutput -join [Environment]::NewLine)"
 }
 
-$output = & $executable $d 2>&1
+$output = & $executable $d $mode 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw "BLS.agg.bf failed."
 }

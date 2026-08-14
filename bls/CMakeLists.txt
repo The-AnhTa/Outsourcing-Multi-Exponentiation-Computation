@@ -1,9 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
-project(bls_agg_bf LANGUAGES CXX)
+project(bls_agg_bf VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(BLS_BUILD_BENCHMARKS "Build the BLS aggregate benchmark" ON)
+
+function(bls_enable_strict_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endfunction()
 
 include(FetchContent)
 if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -26,15 +36,28 @@ if(WIN32 AND TARGET mcl)
   set_target_properties(mcl PROPERTIES OUTPUT_NAME mcl_shared)
 endif()
 
-add_library(bls_agg_bf src/transcript.cpp src/protocol.cpp src/serialization.cpp)
-target_include_directories(bls_agg_bf PUBLIC include)
+add_library(bls_agg_bf
+  src/internal/crypto.cpp
+  src/internal/validation.cpp
+  src/setup.cpp
+  src/transcript.cpp
+  src/protocol.cpp
+  src/serialization.cpp)
+target_include_directories(bls_agg_bf PUBLIC include PRIVATE src)
 target_link_libraries(bls_agg_bf PUBLIC mcl::mcl_st)
 target_compile_features(bls_agg_bf PUBLIC cxx_std_20)
-if(MSVC)
-  target_compile_options(bls_agg_bf PRIVATE /W4 /permissive-)
-else()
-  target_compile_options(bls_agg_bf PRIVATE -Wall -Wextra -Wpedantic)
+bls_enable_strict_warnings(bls_agg_bf)
+
+if(BLS_BUILD_BENCHMARKS)
+  add_executable(run_bls bench/run_bls.cpp)
+  target_link_libraries(run_bls PRIVATE bls_agg_bf)
+  bls_enable_strict_warnings(run_bls)
 endif()
 
-add_executable(run_bls bench/run_bls.cpp)
-target_link_libraries(run_bls PRIVATE bls_agg_bf)
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(bls_tests tests/bls_tests.cpp)
+  target_link_libraries(bls_tests PRIVATE bls_agg_bf)
+  bls_enable_strict_warnings(bls_tests)
+  add_test(NAME bls_tests COMMAND bls_tests)
+endif()

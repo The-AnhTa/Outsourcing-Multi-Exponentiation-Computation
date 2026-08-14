@@ -1,6 +1,8 @@
 #include "blsagg/protocol.hpp"
 #include "blsagg/serialization.hpp"
 #include "blsagg/transcript.hpp"
+#include "internal/crypto.hpp"
+#include "internal/validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,29 +12,20 @@
 #include <limits>
 #include <stdexcept>
 #include <thread>
-#include <type_traits>
-#include <unordered_set>
 
 namespace blsagg {
 namespace {
 
-Fr fm(const Fr& a, const Fr& b) { Fr z; Fr::mul(z, a, b); return z; }
-Fr inv(const Fr& a) {
-  if (a.isZero()) throw std::invalid_argument("zero challenge");
-  Fr z; Fr::inv(z, a); return z;
-}
-G1 add(const G1& a, const G1& b) { G1 z; G1::add(z, a, b); return z; }
-G2 add(const G2& a, const G2& b) { G2 z; G2::add(z, a, b); return z; }
-G1 mul(const G1& a, const Fr& x) { G1 z; G1::mul(z, a, x); return z; }
-G2 mul(const G2& a, const Fr& x) { G2 z; G2::mul(z, a, x); return z; }
-GT gmul(const GT& a, const GT& b) { GT z; GT::mul(z, a, b); return z; }
-GT gpow(const GT& a, const Fr& x) { GT z; GT::pow(z, a, x); return z; }
-GT product(std::initializer_list<GT> xs) {
-  GT z; z.setOne();
-  for (const auto& x : xs) z = gmul(z, x);
-  return z;
-}
-GT pair(const G1& a, const G2& b) { GT z; mcl::bn::pairing(z, a, b); return z; }
+using internal::add;
+using internal::fm;
+using internal::gmul;
+using internal::gpow;
+using internal::inv;
+using internal::msm;
+using internal::mul;
+using internal::pair;
+using internal::product;
+using internal::valid;
 
 struct SymbolicGTArena {
   std::vector<GT> bases;
@@ -101,40 +94,6 @@ SymbolicTarget symbolic_fold(SymbolicGTArena& arena,const Precomputation&a,
             symbolic_scale(symbolic_atom(arena,a.delta2R[level]),bi)})};
 }
 
-template<class G> bool canonical(const G& x) {
-  try {
-    const auto b = serialize(x);
-    G y;
-    return y.deserialize(b.data(), b.size()) == b.size() && y == x;
-  } catch (...) { return false; }
-}
-bool valid(const G1& x, bool nz = false) {
-  return canonical(x) && x.isValid() && x.isValidOrder() && (!nz || !x.isZero());
-}
-bool valid(const G2& x, bool nz = false) {
-  return canonical(x) && x.isValid() && x.isValidOrder() && (!nz || !x.isZero());
-}
-bool valid(const GT& x) { return canonical(x) && mcl::bn::isValidGT(x); }
-
-G1 msm(std::span<const G1> p, std::span<const Fr> s) {
-  if (p.size() != s.size()) throw std::invalid_argument("G1 MSM length");
-  G1 z; z.clear();
-  if (!p.empty()) {
-    std::vector<G1> work(p.begin(), p.end());
-    G1::mulVec(z, work.data(), s.data(), work.size());
-  }
-  return z;
-}
-G2 msm(std::span<const G2> p, std::span<const Fr> s) {
-  if (p.size() != s.size()) throw std::invalid_argument("G2 MSM length");
-  G2 z; z.clear();
-  if (!p.empty()) {
-    std::vector<G2> work(p.begin(), p.end());
-    G2::mulVec(z, work.data(), s.data(), work.size());
-  }
-  return z;
-}
-
 template<class G> std::vector<G> fold(std::span<const G> x, const Fr& r) {
   if (x.size() < 2 || x.size() % 2) throw std::invalid_argument("fold dimension");
   const std::size_t h = x.size() / 2;
@@ -149,73 +108,10 @@ template<class G> std::vector<G> weighted_constant(const G& x, std::span<const F
 }
 
 void append(Bytes& out, std::span<const std::uint8_t> x) {
-  out.insert(out.end(), x.begin(), x.end());
-}
-Digest pp_digest(const PublicParameters& p) {
-  Bytes b;
-  append_frame(b, "bls-agg-bf/pp/v1");
-  append_frame(b, "BN254/mcl-v3.00");
-  append_frame(b, p.mode == AggregationMode::BasicDistinct ? "basic-distinct" : "augmented");
-  append_frame(b, encode_u64(p.k)); append_frame(b, encode_u64(p.d));
-  append_frame(b, serialize(p.H));
-  for (const auto& x : p.Gamma) append_frame(b, serialize(x));
-  for (const auto& x : p.Lambda) append_frame(b, serialize(x));
-  append_frame(b, serialize(p.L)); append_frame(b, serialize(p.Lprime));
-  return sha256(b);
-}
-Digest aux_digest(const PublicParameters& p, const Precomputation& a) {
-  Bytes b; append_frame(b, "bls-agg-bf/aux/v1"); append_frame(b, p.digest);
-  for (const auto& level : a.gamma_chain) for (const auto& x : level) append_frame(b, serialize(x));
-  for (const auto& level : a.lambda_chain) for (const auto& x : level) append_frame(b, serialize(x));
-  for (const auto* v : {&a.X,&a.delta1L,&a.delta1R,&a.delta2L,&a.delta2R})
-    for (const auto& x : *v) append_frame(b, serialize(x));
-  for (const auto* c : {&a.g1_round0,&a.g2_round0}) {
-    append_frame(b, serialize(c->E)); append_frame(b, serialize(c->F));
-    append_frame(b, serialize(c->TL)); append_frame(b, serialize(c->TR));
-  }
-  return sha256(b);
-}
-template<class G> G hash_point(std::string_view tag, std::string_view seed, std::size_t i = 0) {
-  Bytes b; append_frame(b, tag); append_frame(b, seed); append_frame(b, encode_u64(i));
-  G out;
-  if constexpr (std::is_same_v<G, G1>) mcl::bn::hashAndMapToG1(out, b.data(), b.size());
-  else mcl::bn::hashAndMapToG2(out, b.data(), b.size());
-  return out;
-}
-bool distinct(const std::vector<Bytes>& messages) {
-  for (std::size_t i = 0; i < messages.size(); ++i)
-    for (std::size_t j = i + 1; j < messages.size(); ++j)
-      if (messages[i] == messages[j]) return false;
-  return true;
-}
-bool statement_shape(const PublicParameters& p, const Statement& s) {
-  if (s.messages.size() != p.k || s.public_keys.size() != p.k || !valid(s.sigma_agg, true)) return false;
-  if (p.mode == AggregationMode::BasicDistinct && !distinct(s.messages)) return false;
-  for (const auto& x : s.public_keys) if (!valid(x, true)) return false;
-  return true;
-}
-bool pp_shape(const PublicParameters& p) {
-  if (p.d < 1 || p.d >= std::numeric_limits<std::size_t>::digits ||
-      p.k != (std::size_t{1} << p.d) || p.Gamma.size() != p.k || p.Lambda.size() != p.k ||
-      (p.mode != AggregationMode::BasicDistinct && p.mode != AggregationMode::Augmented)) return false;
-  if (!valid(p.H, true) || !valid(p.L, true) || !valid(p.Lprime, true)) return false;
-  for (const auto& x : p.Gamma) if (!valid(x, true)) return false;
-  for (const auto& x : p.Lambda) if (!valid(x, true)) return false;
-  return pp_digest(p) == p.digest;
+  internal::append_raw(out, x);
 }
 bool targets_equal(const DoryTarget& a, const DoryTarget& b) {
   return a.D0 == b.D0 && a.D1 == b.D1 && a.D2 == b.D2;
-}
-bool claims_equal(const RexpClaims& a, const RexpClaims& b) {
-  return a.E==b.E && a.F==b.F && a.TL==b.TL && a.TR==b.TR;
-}
-bool aux_equal(const Precomputation& a, const Precomputation& b) {
-  if (a.gamma_chain != b.gamma_chain || a.lambda_chain != b.lambda_chain || a.X != b.X ||
-      a.delta1L != b.delta1L || a.delta1R != b.delta1R ||
-      a.delta2L != b.delta2L || a.delta2R != b.delta2R ||
-      !claims_equal(a.g1_round0,b.g1_round0) || !claims_equal(a.g2_round0,b.g2_round0))
-    return false;
-  return a.digest == b.digest;
 }
 
 void absorb_claim(Transcript& tr, std::string_view label, std::size_t q, const RexpClaims& c) {
@@ -236,6 +132,92 @@ void absorb_step_w(Transcript& tr, std::size_t level, const DoryStep& s) {
   std::array<Bytes,2> f{serialize(s.W1),serialize(s.W2)};
   tr.absorb("bls-agg-bf/dory-w", level, f);
 }
+
+class VerifierTranscriptReplay {
+ public:
+  VerifierTranscriptReplay(const PublicParameters& parameters,
+                           const Statement& statement,
+                           std::span<const G1> message_points,
+                           const Proof& proof)
+      : transcript_(parameters, statement, message_points) {
+    const std::array<Bytes, 3> claims{serialize(proof.cm_M),
+                                      serialize(proof.cm_pk),
+                                      serialize(proof.T)};
+    transcript_.absorb("bls-agg-bf/claims", 0, claims);
+  }
+
+  std::pair<Fr, Fr> rexp_round(std::size_t round,
+                               const RexpClaims& g1_claim,
+                               const RexpClaims& g2_claim) {
+    absorb_claim(transcript_, "bls-agg-bf/rexp-g1-claim", round,
+                 g1_claim);
+    absorb_claim(transcript_, "bls-agg-bf/rexp-g2-claim", round,
+                 g2_claim);
+    const auto g1_challenge = transcript_.challenge_nonzero(
+        "bls-agg-bf/rexp-g1-challenge", round);
+    const auto g2_challenge = transcript_.challenge_nonzero(
+        "bls-agg-bf/rexp-g2-challenge", round);
+    return {g1_challenge, g2_challenge};
+  }
+
+  void finish_rexp(const Proof& proof) {
+    const std::array<Bytes, 2> final{serialize(proof.R_Gamma),
+                                     serialize(proof.R_Lambda)};
+    transcript_.absorb("bls-agg-bf/rexp-final", 0, final);
+  }
+
+  std::pair<Fr, Fr> application(const DoryTarget& messages,
+                                const DoryTarget& public_keys,
+                                const DoryTarget& pairing_claim,
+                                const Proof& proof) {
+    absorb_targets(transcript_, messages, public_keys, pairing_claim);
+    transcript_.absorb("bls-agg-bf/application-u1", 0,
+                       serialize(proof.U1));
+    const auto eta = transcript_.challenge_nonzero(
+        "bls-agg-bf/application-eta", 0);
+    transcript_.absorb("bls-agg-bf/application-u2", 0,
+                       serialize(proof.U2));
+    const auto zeta = transcript_.challenge_nonzero(
+        "bls-agg-bf/application-zeta", 0);
+    return {eta, zeta};
+  }
+
+  std::pair<Fr, Fr> dory_round(std::size_t level,
+                               const DoryStep& step) {
+    absorb_step_a(transcript_, level, step);
+    const auto beta =
+        transcript_.challenge_nonzero("bls-agg-bf/dory-beta", level);
+    absorb_step_w(transcript_, level, step);
+    const auto alpha =
+        transcript_.challenge_nonzero("bls-agg-bf/dory-alpha", level);
+    return {beta, alpha};
+  }
+
+  Fr insert_g1(std::size_t round, const GT& cross_term) {
+    transcript_.absorb("bls-agg-bf/insert-g1-u", round,
+                       serialize(cross_term));
+    return transcript_.challenge_nonzero("bls-agg-bf/insert-g1-gamma",
+                                         round);
+  }
+
+  Fr insert_g2(std::size_t round, const GT& cross_term) {
+    transcript_.absorb("bls-agg-bf/insert-g2-u", round,
+                       serialize(cross_term));
+    return transcript_.challenge_nonzero("bls-agg-bf/insert-g2-gamma",
+                                         round);
+  }
+
+  void bind_final(const Proof& proof) {
+    const std::array<Bytes, 2> final{serialize(proof.Phi_final),
+                                     serialize(proof.Theta_final)};
+    transcript_.absorb("bls-agg-bf/final-opening", 0, final);
+  }
+
+  double timing_ms() const { return transcript_.timing_ms(); }
+
+ private:
+  Transcript transcript_;
+};
 
 DoryInstance batch(const DoryInstance& old, const DoryInstance& fresh, const GT& u, const Fr& gamma) {
   if (old.witness.Phi.size()!=fresh.witness.Phi.size() ||
@@ -340,36 +322,127 @@ std::pair<DoryInstance,DoryStep> fold_dory(const PublicParameters& p,const Preco
 }
 
 DoryTarget fold_target(const Precomputation&a,const DoryTarget&in,const DoryStep&s,
-    std::size_t level,Transcript&tr,Fr* beta_out=nullptr,Fr* alpha_out=nullptr){
-  absorb_step_a(tr,level,s);const Fr beta=tr.challenge_nonzero("bls-agg-bf/dory-beta",level),bi=inv(beta);
-  absorb_step_w(tr,level,s);const Fr alpha=tr.challenge_nonzero("bls-agg-bf/dory-alpha",level),ai=inv(alpha);
-  if(beta_out)*beta_out=beta;if(alpha_out)*alpha_out=alpha;
+    std::size_t level,const Fr&beta,const Fr&alpha){
+  const auto bi=inv(beta),ai=inv(alpha);
   return {product({in.D0,a.X[level],gpow(in.D1,bi),gpow(in.D2,beta),gpow(s.W1,alpha),gpow(s.W2,ai)}),
     product({gpow(s.A1L,alpha),s.A1R,gpow(a.delta1L[level],fm(alpha,beta)),gpow(a.delta1R[level],beta)}),
     product({gpow(s.A2L,ai),s.A2R,gpow(a.delta2L[level],fm(ai,bi)),gpow(a.delta2R[level],bi)})};
 }
 
-bool proof_shape(const PublicParameters&p,const Proof&v){
-  if(v.g1_rexp_claims.size()!=p.d-1||v.g2_rexp_claims.size()!=p.d-1||
-     v.dory_steps.size()!=p.d||v.insert_g1_u.size()!=p.d||v.insert_g2_u.size()!=p.d)return false;
-  for(const auto* x:{&v.cm_M,&v.cm_pk,&v.T,&v.U1,&v.U2})if(!valid(*x))return false;
-  if(!valid(v.R_Gamma)||!valid(v.R_Lambda)||!valid(v.Phi_final)||!valid(v.Theta_final))return false;
-  for(const auto&c:v.g1_rexp_claims)if(!valid(c.E)||!valid(c.F)||!valid(c.TL)||!valid(c.TR))return false;
-  for(const auto&c:v.g2_rexp_claims)if(!valid(c.E)||!valid(c.F)||!valid(c.TL)||!valid(c.TR))return false;
-  for(const auto&s:v.dory_steps)for(const auto*x:{&s.A1L,&s.A1R,&s.A2L,&s.A2R,&s.W1,&s.W2})if(!valid(*x))return false;
-  for(const auto&x:v.insert_g1_u)if(!valid(x))return false;
-  for(const auto&x:v.insert_g2_u)if(!valid(x))return false;
-  return true;
+struct ApplicationInstances {
+  DoryInstance messages;
+  DoryInstance public_keys;
+  DoryInstance pairing_claim;
+};
+
+void commit_application_claims(const PublicParameters& parameters,
+                               const Statement& statement,
+                               std::span<const G1> message_points,
+                               Transcript& transcript, Proof& proof) {
+  proof.cm_M = direct_pairing_product(message_points, parameters.Lambda);
+  proof.cm_pk =
+      direct_pairing_product(parameters.Gamma, statement.public_keys);
+  proof.T = direct_pairing_product(message_points, statement.public_keys);
+  const std::array<Bytes, 3> claims{serialize(proof.cm_M),
+                                    serialize(proof.cm_pk),
+                                    serialize(proof.T)};
+  transcript.absorb("bls-agg-bf/claims", 0, claims);
 }
 
-Digest context_binding(const PublicParameters&p,const Precomputation&a,const Statement&s,
-                       std::span<const G1> message_points) {
-  Bytes b;append_frame(b,"bls-agg-bf/validated-context/v1");
-  append_frame(b,p.digest);append_frame(b,a.digest);append_frame(b,serialize(s.sigma_agg));
-  for(const auto&m:s.messages)append_frame(b,m);
-  for(const auto&x:s.public_keys)append_frame(b,serialize(x));
-  for(const auto&x:message_points)append_frame(b,serialize(x));
-  return sha256(b);
+ApplicationInstances build_application_instances(
+    const PublicParameters& parameters, const Statement& statement,
+    std::span<const G1> message_points, const Proof& proof,
+    const RexpProverData& rexp) {
+  const auto message_weights = tensor_vector(rexp.r);
+  const auto key_weights = tensor_vector(rexp.rp);
+  const auto reduced_messages = msm(message_points, message_weights);
+  const auto reduced_keys = msm(statement.public_keys, key_weights);
+
+  ApplicationInstances result;
+  result.messages.target =
+      {pair(reduced_messages, parameters.Lprime), proof.cm_M,
+       pair(proof.R_Gamma, parameters.Lprime)};
+  result.messages.witness.Phi.assign(message_points.begin(),
+                                     message_points.end());
+  result.messages.witness.Theta =
+      weighted_constant(parameters.Lprime, message_weights);
+
+  result.public_keys.target =
+      {pair(parameters.L, reduced_keys), pair(parameters.L, proof.R_Lambda),
+       proof.cm_pk};
+  result.public_keys.witness.Phi =
+      weighted_constant(parameters.L, key_weights);
+  result.public_keys.witness.Theta = statement.public_keys;
+
+  result.pairing_claim.target = {proof.T, proof.cm_M, proof.cm_pk};
+  result.pairing_claim.witness.Phi.assign(message_points.begin(),
+                                          message_points.end());
+  result.pairing_claim.witness.Theta = statement.public_keys;
+  return result;
+}
+
+DoryInstance batch_application_instances(const ApplicationInstances& inputs,
+                                         Transcript& transcript,
+                                         Proof& proof) {
+  absorb_targets(transcript, inputs.messages.target, inputs.public_keys.target,
+                 inputs.pairing_claim.target);
+  proof.U1 = cross(inputs.messages.witness, inputs.public_keys.witness);
+  transcript.absorb("bls-agg-bf/application-u1", 0, serialize(proof.U1));
+  const auto eta =
+      transcript.challenge_nonzero("bls-agg-bf/application-eta", 0);
+  auto accumulator =
+      batch(inputs.messages, inputs.public_keys, proof.U1, eta);
+  proof.U2 = cross(accumulator.witness, inputs.pairing_claim.witness);
+  transcript.absorb("bls-agg-bf/application-u2", 0, serialize(proof.U2));
+  const auto zeta =
+      transcript.challenge_nonzero("bls-agg-bf/application-zeta", 0);
+  return batch(accumulator, inputs.pairing_claim, proof.U2, zeta);
+}
+
+DoryInstance fold_and_insert_rexp(const PublicParameters& parameters,
+                                  const Precomputation& precomputation,
+                                  const RexpProverData& rexp,
+                                  Transcript& transcript, Proof& proof,
+                                  DoryInstance accumulator) {
+  proof.dory_steps.reserve(parameters.d);
+  proof.insert_g1_u.reserve(parameters.d);
+  proof.insert_g2_u.reserve(parameters.d);
+  for (std::size_t round = 1; round <= parameters.d; ++round) {
+    auto [folded, step] = fold_dory(parameters, precomputation, accumulator,
+                                    round - 1, transcript);
+    proof.dory_steps.push_back(std::move(step));
+
+    const auto insert_g1 = cross(folded.witness, rexp.g1[round].witness);
+    proof.insert_g1_u.push_back(insert_g1);
+    transcript.absorb("bls-agg-bf/insert-g1-u", round,
+                      serialize(insert_g1));
+    const auto gamma_g1 =
+        transcript.challenge_nonzero("bls-agg-bf/insert-g1-gamma", round);
+    auto with_g1 =
+        batch(folded, rexp.g1[round], insert_g1, gamma_g1);
+
+    const auto insert_g2 = cross(with_g1.witness, rexp.g2[round].witness);
+    proof.insert_g2_u.push_back(insert_g2);
+    transcript.absorb("bls-agg-bf/insert-g2-u", round,
+                      serialize(insert_g2));
+    const auto gamma_g2 =
+        transcript.challenge_nonzero("bls-agg-bf/insert-g2-gamma", round);
+    accumulator =
+        batch(with_g1, rexp.g2[round], insert_g2, gamma_g2);
+  }
+  return accumulator;
+}
+
+void bind_final_opening(const DoryInstance& accumulator,
+                        Transcript& transcript, Proof& proof) {
+  if (accumulator.witness.Phi.size() != 1 ||
+      accumulator.witness.Theta.size() != 1)
+    throw std::logic_error("invalid terminal witness dimension");
+  proof.Phi_final = accumulator.witness.Phi.front();
+  proof.Theta_final = accumulator.witness.Theta.front();
+  const std::array<Bytes, 2> final{serialize(proof.Phi_final),
+                                   serialize(proof.Theta_final)};
+  transcript.absorb("bls-agg-bf/final-opening", 0, final);
 }
 
 }
@@ -390,35 +463,6 @@ std::vector<Fr> tensor_vector(std::span<const Fr> r) {
   return w;
 }
 
-SetupResult setup(std::size_t d, AggregationMode mode, std::string_view seed) {
-  initialize();
-  if(d<1||d>=std::numeric_limits<std::size_t>::digits)throw std::invalid_argument("invalid d");
-  SetupResult out;auto&p=out.pp;p.d=d;p.k=std::size_t{1}<<d;p.mode=mode;
-  p.H=hash_point<G2>("bls-agg-bf/H",seed);p.L=hash_point<G1>("bls-agg-bf/L",seed);
-  p.Lprime=hash_point<G2>("bls-agg-bf/Lprime",seed);
-  for(std::size_t i=0;i<p.k;++i){p.Gamma.push_back(hash_point<G1>("bls-agg-bf/Gamma",seed,i));
-    p.Lambda.push_back(hash_point<G2>("bls-agg-bf/Lambda",seed,i));}
-  p.digest=pp_digest(p);out.aux=precompute(p);return out;
-}
-Precomputation precompute(const PublicParameters&p){
-  if(!pp_shape(p))throw std::invalid_argument("invalid public parameters");
-  Precomputation a;a.gamma_chain.push_back(p.Gamma);a.lambda_chain.push_back(p.Lambda);
-  for(std::size_t j=1;j<=p.d;++j){const auto n=p.k>>j;
-    a.gamma_chain.emplace_back(a.gamma_chain[j-1].begin(),a.gamma_chain[j-1].begin()+n);
-    a.lambda_chain.emplace_back(a.lambda_chain[j-1].begin(),a.lambda_chain[j-1].begin()+n);}
-  for(std::size_t j=0;j<=p.d;++j)a.X.push_back(direct_pairing_product(a.gamma_chain[j],a.lambda_chain[j]));
-  for(std::size_t j=0;j<p.d;++j){const auto m=p.k>>j,h=m/2;
-    a.delta1L.push_back(direct_pairing_product(std::span(a.gamma_chain[j]).first(h),a.lambda_chain[j+1]));
-    a.delta1R.push_back(direct_pairing_product(std::span(a.gamma_chain[j]).subspan(h,h),a.lambda_chain[j+1]));
-    a.delta2L.push_back(direct_pairing_product(a.gamma_chain[j+1],std::span(a.lambda_chain[j]).first(h)));
-    a.delta2R.push_back(direct_pairing_product(a.gamma_chain[j+1],std::span(a.lambda_chain[j]).subspan(h,h)));}
-  const auto h=p.k/2;
-  a.g1_round0={direct_pairing_product(std::span(p.Gamma).subspan(h,h),std::span(p.Lambda).first(h)),
-    direct_pairing_product(std::span(p.Gamma).first(h),std::span(p.Lambda).subspan(h,h)),
-    a.delta1L[0],a.delta1R[0]};
-  a.g2_round0={a.g1_round0.F,a.g1_round0.E,a.delta2L[0],a.delta2R[0]};
-  a.digest=aux_digest(p,a);return a;
-}
 std::vector<G1> hash_messages(const PublicParameters&p,const Statement&s){
   if(s.messages.size()!=p.k||s.public_keys.size()!=p.k)throw std::invalid_argument("statement length");
   std::vector<G1> out;out.reserve(p.k);
@@ -430,52 +474,42 @@ std::vector<G1> hash_messages(const PublicParameters&p,const Statement&s){
 }
 
 Proof prove(const PublicParameters&p,const Precomputation&a,const Statement&s){
-  if(!pp_shape(p)||!statement_shape(p,s)||!aux_equal(a,precompute(p)))throw std::invalid_argument("invalid prove input");
-  const auto M=hash_messages(p,s);Transcript tr(p,s,M);Proof proof;
-  proof.cm_M=direct_pairing_product(M,p.Lambda);proof.cm_pk=direct_pairing_product(p.Gamma,s.public_keys);
-  proof.T=direct_pairing_product(M,s.public_keys);
-  std::array<Bytes,3> claims{serialize(proof.cm_M),serialize(proof.cm_pk),serialize(proof.T)};
-  tr.absorb("bls-agg-bf/claims",0,claims);
-  auto rdata=prove_rexp(p,a,tr,proof);const auto sw=tensor_vector(rdata.r),tw=tensor_vector(rdata.rp);
-  const G1 Y_M=msm(M,sw);const G2 Y_pk=msm(s.public_keys,tw);
-  DoryInstance im,ip,it;
-  im.target={pair(Y_M,p.Lprime),proof.cm_M,pair(proof.R_Gamma,p.Lprime)};
-  im.witness.Phi=M;im.witness.Theta=weighted_constant(p.Lprime,sw);
-  ip.target={pair(p.L,Y_pk),pair(p.L,proof.R_Lambda),proof.cm_pk};
-  ip.witness.Phi=weighted_constant(p.L,tw);ip.witness.Theta=s.public_keys;
-  it.target={proof.T,proof.cm_M,proof.cm_pk};it.witness.Phi=M;it.witness.Theta=s.public_keys;
-  absorb_targets(tr,im.target,ip.target,it.target);
-  proof.U1=cross(im.witness,ip.witness);tr.absorb("bls-agg-bf/application-u1",0,serialize(proof.U1));
-  const Fr eta=tr.challenge_nonzero("bls-agg-bf/application-eta",0);
-  auto agg=batch(im,ip,proof.U1,eta);
-  proof.U2=cross(agg.witness,it.witness);tr.absorb("bls-agg-bf/application-u2",0,serialize(proof.U2));
-  const Fr zeta=tr.challenge_nonzero("bls-agg-bf/application-zeta",0);agg=batch(agg,it,proof.U2,zeta);
-  for(std::size_t j=1;j<=p.d;++j){
-    auto folded=fold_dory(p,a,agg,j-1,tr);auto bar=std::move(folded.first);proof.dory_steps.push_back(folded.second);
-    const GT ug=cross(bar.witness,rdata.g1[j].witness);proof.insert_g1_u.push_back(ug);
-    tr.absorb("bls-agg-bf/insert-g1-u",j,serialize(ug));
-    const Fr gg=tr.challenge_nonzero("bls-agg-bf/insert-g1-gamma",j);auto hat=batch(bar,rdata.g1[j],ug,gg);
-    const GT ul=cross(hat.witness,rdata.g2[j].witness);proof.insert_g2_u.push_back(ul);
-    tr.absorb("bls-agg-bf/insert-g2-u",j,serialize(ul));
-    const Fr gl=tr.challenge_nonzero("bls-agg-bf/insert-g2-gamma",j);agg=batch(hat,rdata.g2[j],ul,gl);
-  }
-  proof.Phi_final=agg.witness.Phi.at(0);proof.Theta_final=agg.witness.Theta.at(0);
-  std::array<Bytes,2> final{serialize(proof.Phi_final),serialize(proof.Theta_final)};
-  tr.absorb("bls-agg-bf/final-opening",0,final);
+  if(!internal::valid_public_parameters(p)||!internal::valid_statement(p,s)||
+     !internal::valid_precomputation(p,a))throw std::invalid_argument("invalid prove input");
+  const auto message_points=hash_messages(p,s);Transcript tr(p,s,message_points);Proof proof;
+  commit_application_claims(p,s,message_points,tr,proof);
+  const auto rexp=prove_rexp(p,a,tr,proof);
+  const auto applications=build_application_instances(p,s,message_points,proof,rexp);
+  auto accumulator=batch_application_instances(applications,tr,proof);
+  accumulator=fold_and_insert_rexp(p,a,rexp,tr,proof,std::move(accumulator));
+  bind_final_opening(accumulator,tr,proof);
   return proof;
 }
 
 std::optional<ValidatedVerifierContext> prepare_verifier_context(const PublicParameters&p,const Precomputation&a,const Statement&s){
   try{
-    if(!pp_shape(p)||!statement_shape(p,s))return std::nullopt;
-    const auto expected=precompute(p);if(!aux_equal(a,expected)||a.digest!=aux_digest(p,a))return std::nullopt;
-    auto points=hash_messages(p,s);auto binding=context_binding(p,a,s,points);
+  if(!internal::valid_public_parameters(p)||!internal::valid_statement(p,s)||
+     !internal::valid_precomputation(p,a))return std::nullopt;
+  auto points=hash_messages(p,s);auto binding=internal::context_binding(p,a,s,points);
     return ValidatedVerifierContext(p,a,s,std::move(points),binding);
   }catch(...){return std::nullopt;}
 }
 
+enum class MsmStrategy { Sequential, Parallel, SplitG2 };
+
+bool validated_proof_matches(const PublicParameters& parameters,
+                             const ValidatedProof& validated) {
+  if (validated.parameter_digest() != parameters.digest) return false;
+  try {
+    return validated.wire_binding() ==
+           internal::validated_proof_binding(parameters, validated.proof());
+  } catch (...) {
+    return false;
+  }
+}
+
 static VerificationTrace verify_online_core(const ValidatedVerifierContext&c,const Proof&v,
-                                             bool proof_prevalidated,bool parallel_msm){
+                                             bool proof_prevalidated,MsmStrategy strategy){
   VerificationTrace out;
   using Clock=std::chrono::steady_clock;
   const auto elapsed=[](auto x,auto y){return std::chrono::duration<double,std::milli>(y-x).count();};
@@ -483,19 +517,17 @@ static VerificationTrace verify_online_core(const ValidatedVerifierContext&c,con
   try{
     const auto&p=c.parameters();const auto&a=c.precomputation();const auto&s=c.statement();
     const auto message_points=c.message_points();
-    if(context_binding(p,a,s,message_points)!=c.binding())return out;
+  if(internal::context_binding(p,a,s,message_points)!=c.binding())return out;
     auto tick=Clock::now();
-    if(!proof_prevalidated&&!proof_shape(p,v))return out;
+  if(!proof_prevalidated&&!internal::valid_proof(p,v))return out;
     auto tock=Clock::now();out.proof_validation_ms=elapsed(tick,tock);tick=Clock::now();
-    Transcript tr(p,s,message_points);std::array<Bytes,3> claims{serialize(v.cm_M),serialize(v.cm_pk),serialize(v.T)};
-    tr.absorb("bls-agg-bf/claims",0,claims);
+    VerifierTranscriptReplay replay(p,s,message_points,v);
     std::vector<DoryTarget>g1(p.d+1),g2(p.d+1);std::vector<Fr>rs(p.d),rt(p.d);GT d1=a.X[0],d2=a.X[0];
     out.g1_rexp_challenges.resize(p.d);out.g2_rexp_challenges.resize(p.d);
     double rexp_ms=0;
     for(std::size_t q=0;q<p.d;++q){const auto c1=q? v.g1_rexp_claims[q-1]:a.g1_round0;
       const auto c2=q? v.g2_rexp_claims[q-1]:a.g2_round0;
-      absorb_claim(tr,"bls-agg-bf/rexp-g1-claim",q,c1);absorb_claim(tr,"bls-agg-bf/rexp-g2-claim",q,c2);
-      const Fr r=tr.challenge_nonzero("bls-agg-bf/rexp-g1-challenge",q),rp=tr.challenge_nonzero("bls-agg-bf/rexp-g2-challenge",q);
+      const auto [r,rp]=replay.rexp_round(q,c1,c2);
       auto phase=Clock::now();
       rs[p.d-q-1]=r;rt[p.d-q-1]=rp;
       out.g1_rexp_challenges[q]=r;out.g2_rexp_challenges[q]=rp;
@@ -504,24 +536,22 @@ static VerificationTrace verify_online_core(const ValidatedVerifierContext&c,con
       g2[q+1]={product({d2,gpow(c2.E,rp),gpow(c2.F,inv(rp))}),gmul(a.delta1L[q],gpow(a.delta1R[q],inv(rp))),
         gmul(c2.TL,gpow(c2.TR,rp))};d1=g1[q+1].D1;d2=g2[q+1].D2;
       auto phase_end=Clock::now();rexp_ms+=elapsed(phase,phase_end);}
-    std::array<Bytes,2> rf{serialize(v.R_Gamma),serialize(v.R_Lambda)};
-    tr.absorb("bls-agg-bf/rexp-final",0,rf);
+    replay.finish_rexp(v);
     out.rexp_gt_recurrence_ms=rexp_ms;tick=Clock::now();
     out.g1_rexp_targets=g1;out.g2_rexp_targets=g2;
     const auto sw=tensor_vector(rs),tw=tensor_vector(rt);
     tock=Clock::now();out.tensor_reconstruction_ms=elapsed(tick,tock);
     const auto msm_wall_start=Clock::now();
-    if(parallel_msm){
+    if(strategy!=MsmStrategy::Sequential){
       std::exception_ptr worker_error;
-      std::thread g1_worker([&]{
+      std::jthread g1_worker([&]{
         const auto start=Clock::now();
         try{out.Y_M=msm(message_points,sw);}
         catch(...){worker_error=std::current_exception();}
         out.message_g1_msm_ms=elapsed(start,Clock::now());
       });
       const auto g2_start=Clock::now();
-      try{out.Y_pk=msm(s.public_keys,tw);}
-      catch(...){g1_worker.join();throw;}
+      out.Y_pk=msm(s.public_keys,tw);
       out.public_key_g2_msm_ms=elapsed(g2_start,Clock::now());
       g1_worker.join();
       if(worker_error)std::rethrow_exception(worker_error);
@@ -531,28 +561,28 @@ static VerificationTrace verify_online_core(const ValidatedVerifierContext&c,con
       out.public_key_g2_msm_ms=elapsed(start,Clock::now());
     }
     out.public_input_msm_wall_ms=elapsed(msm_wall_start,Clock::now());tick=Clock::now();
-    const double transcript_before_application=tr.timing_ms();
+    const double transcript_before_application=replay.timing_ms();
     DoryTarget im{pair(out.Y_M,p.Lprime),v.cm_M,pair(v.R_Gamma,p.Lprime)};
     DoryTarget ip{pair(p.L,out.Y_pk),pair(p.L,v.R_Lambda),v.cm_pk};
-    DoryTarget it{v.T,v.cm_M,v.cm_pk};absorb_targets(tr,im,ip,it);
-    tr.absorb("bls-agg-bf/application-u1",0,serialize(v.U1));const Fr eta=tr.challenge_nonzero("bls-agg-bf/application-eta",0);
-    auto agg=batch_target(im,ip,v.U1,eta);tr.absorb("bls-agg-bf/application-u2",0,serialize(v.U2));
-    const Fr zeta=tr.challenge_nonzero("bls-agg-bf/application-zeta",0);agg=batch_target(agg,it,v.U2,zeta);
+    DoryTarget it{v.T,v.cm_M,v.cm_pk};
+    const auto [eta,zeta]=replay.application(im,ip,it,v);
+    auto agg=batch_target(im,ip,v.U1,eta);
+    agg=batch_target(agg,it,v.U2,zeta);
     out.eta=eta;out.zeta=zeta;out.accumulator_targets.push_back(agg);
-    tock=Clock::now();out.application_batching_ms=elapsed(tick,tock)-(tr.timing_ms()-transcript_before_application);tick=Clock::now();
-    const double transcript_before_dory=tr.timing_ms();
+    tock=Clock::now();out.application_batching_ms=elapsed(tick,tock)-(replay.timing_ms()-transcript_before_application);tick=Clock::now();
+    const double transcript_before_dory=replay.timing_ms();
     out.dory_beta.resize(p.d);out.dory_alpha.resize(p.d);out.insert_g1_gamma.resize(p.d);out.insert_g2_gamma.resize(p.d);
-    for(std::size_t j=1;j<=p.d;++j){auto bar=fold_target(a,agg,v.dory_steps[j-1],j-1,tr,&out.dory_beta[j-1],&out.dory_alpha[j-1]);
+    for(std::size_t j=1;j<=p.d;++j){const auto [beta,alpha]=replay.dory_round(j-1,v.dory_steps[j-1]);
+      out.dory_beta[j-1]=beta;out.dory_alpha[j-1]=alpha;
+      auto bar=fold_target(a,agg,v.dory_steps[j-1],j-1,beta,alpha);
       out.dory_fold_targets.push_back(bar);
-      tr.absorb("bls-agg-bf/insert-g1-u",j,serialize(v.insert_g1_u[j-1]));
-      const Fr gg=tr.challenge_nonzero("bls-agg-bf/insert-g1-gamma",j);auto hat=batch_target(bar,g1[j],v.insert_g1_u[j-1],gg);
-      tr.absorb("bls-agg-bf/insert-g2-u",j,serialize(v.insert_g2_u[j-1]));
-      const Fr gl=tr.challenge_nonzero("bls-agg-bf/insert-g2-gamma",j);agg=batch_target(hat,g2[j],v.insert_g2_u[j-1],gl);
+      const Fr gg=replay.insert_g1(j,v.insert_g1_u[j-1]);auto hat=batch_target(bar,g1[j],v.insert_g1_u[j-1],gg);
+      const Fr gl=replay.insert_g2(j,v.insert_g2_u[j-1]);agg=batch_target(hat,g2[j],v.insert_g2_u[j-1],gl);
       out.insert_g1_gamma[j-1]=gg;out.insert_g2_gamma[j-1]=gl;out.accumulator_targets.push_back(agg);}
-    tock=Clock::now();out.integrated_dory_ms=elapsed(tick,tock)-(tr.timing_ms()-transcript_before_dory);tick=Clock::now();
-    std::array<Bytes,2> final{serialize(v.Phi_final),serialize(v.Theta_final)};tr.absorb("bls-agg-bf/final-opening",0,final);
+    tock=Clock::now();out.integrated_dory_ms=elapsed(tick,tock)-(replay.timing_ms()-transcript_before_dory);tick=Clock::now();
+    replay.bind_final(v);
     out.final_dory=agg;out.final_g1_rexp=g1[p.d];out.final_g2_rexp=g2[p.d];
-    tock=Clock::now();out.final_challenges_ms=0;out.transcript_hashing_ms=tr.timing_ms();tick=Clock::now();
+    tock=Clock::now();out.final_challenges_ms=0;out.transcript_hashing_ms=replay.timing_ms();tick=Clock::now();
     out.accepted=pair(v.Phi_final,v.Theta_final)==agg.D0&&pair(v.Phi_final,a.lambda_chain[p.d][0])==agg.D1&&
       pair(a.gamma_chain[p.d][0],v.Theta_final)==agg.D2&&pair(v.R_Gamma,a.lambda_chain[p.d][0])==g1[p.d].D1&&
       pair(a.gamma_chain[p.d][0],v.R_Lambda)==g2[p.d].D2&&pair(s.sigma_agg,p.H)==v.T;
@@ -565,19 +595,18 @@ static VerificationTrace verify_online_core(const ValidatedVerifierContext&c,con
 static VerificationTrace verify_online_symbolic_core(const ValidatedVerifierContext&c,
                                                        const ValidatedProof&validated,
                                                        bool capture_intermediates,
-                                                       bool split_g2_msm=false){
+                                                       MsmStrategy strategy){
   VerificationTrace out;
   using Clock=std::chrono::steady_clock;
   const auto elapsed=[](auto x,auto y){return std::chrono::duration<double,std::milli>(y-x).count();};
   const auto total_start=Clock::now();
   try{
     const auto&p=c.parameters();const auto&a=c.precomputation();const auto&s=c.statement();
-    if(validated.parameter_digest()!=p.digest)return out;
+    if(!validated_proof_matches(p,validated))return out;
     const auto&v=validated.proof();const auto message_points=c.message_points();
-    if(context_binding(p,a,s,message_points)!=c.binding())return out;
+  if(internal::context_binding(p,a,s,message_points)!=c.binding())return out;
     auto tick=Clock::now();out.proof_validation_ms=0;
-    Transcript tr(p,s,message_points);std::array<Bytes,3> claims{serialize(v.cm_M),serialize(v.cm_pk),serialize(v.T)};
-    tr.absorb("bls-agg-bf/claims",0,claims);
+    VerifierTranscriptReplay replay(p,s,message_points,v);
     SymbolicGTArena arena;
     std::vector<SymbolicTarget>g1(p.d+1),g2(p.d+1);std::vector<Fr>rs(p.d),rt(p.d);
     auto d1=symbolic_atom(arena,a.X[0]),d2=symbolic_atom(arena,a.X[0]);
@@ -586,8 +615,7 @@ static VerificationTrace verify_online_symbolic_core(const ValidatedVerifierCont
     double rexp_ms=0;
     for(std::size_t q=0;q<p.d;++q){const auto c1=q?v.g1_rexp_claims[q-1]:a.g1_round0;
       const auto c2=q?v.g2_rexp_claims[q-1]:a.g2_round0;
-      absorb_claim(tr,"bls-agg-bf/rexp-g1-claim",q,c1);absorb_claim(tr,"bls-agg-bf/rexp-g2-claim",q,c2);
-      const Fr r=tr.challenge_nonzero("bls-agg-bf/rexp-g1-challenge",q),rp=tr.challenge_nonzero("bls-agg-bf/rexp-g2-challenge",q);
+      const auto [r,rp]=replay.rexp_round(q,c1,c2);
       auto phase=Clock::now();const auto ri=inv(r),rpi=inv(rp);
       rs[p.d-q-1]=r;rt[p.d-q-1]=rp;out.g1_rexp_challenges[q]=r;out.g2_rexp_challenges[q]=rp;
       g1[q+1]={symbolic_sum({d1,symbolic_scale(symbolic_atom(arena,c1.E),r),
@@ -605,69 +633,63 @@ static VerificationTrace verify_online_symbolic_core(const ValidatedVerifierCont
         out.g2_rexp_targets[q+1]=symbolic_evaluate(arena,g2[q+1]);}
       rexp_ms+=elapsed(phase,Clock::now());
     }
-    std::array<Bytes,2> rf{serialize(v.R_Gamma),serialize(v.R_Lambda)};
-    tr.absorb("bls-agg-bf/rexp-final",0,rf);out.rexp_gt_recurrence_ms=rexp_ms;tick=Clock::now();
+    replay.finish_rexp(v);out.rexp_gt_recurrence_ms=rexp_ms;tick=Clock::now();
     const auto sw=tensor_vector(rs),tw=tensor_vector(rt);auto tock=Clock::now();
     out.tensor_reconstruction_ms=elapsed(tick,tock);
     const auto msm_wall_start=Clock::now();
-    if(split_g2_msm&&s.public_keys.size()>=2){
+    if(strategy==MsmStrategy::SplitG2&&s.public_keys.size()>=2){
       const auto half=s.public_keys.size()/2;G2 g2_left,g2_right;
-      std::array<std::exception_ptr,3> errors{};std::vector<std::thread> workers;workers.reserve(2);
-      try{
-        workers.emplace_back([&]{const auto start=Clock::now();try{out.Y_M=msm(message_points,sw);}
+      std::array<std::exception_ptr,3> errors{};std::vector<std::jthread> workers;workers.reserve(2);
+      workers.emplace_back([&]{const auto start=Clock::now();try{out.Y_M=msm(message_points,sw);}
           catch(...){errors[0]=std::current_exception();}out.message_g1_msm_ms=elapsed(start,Clock::now());});
-        workers.emplace_back([&]{const auto start=Clock::now();
+      workers.emplace_back([&]{const auto start=Clock::now();
           try{g2_left=msm(std::span(s.public_keys).first(half),std::span(tw).first(half));}
           catch(...){errors[1]=std::current_exception();}
           out.public_key_g2_left_msm_ms=elapsed(start,Clock::now());});
-      }catch(...){for(auto& worker:workers)worker.join();throw;}
       const auto right_start=Clock::now();
       try{g2_right=msm(std::span(s.public_keys).subspan(half),std::span(tw).subspan(half));}
       catch(...){errors[2]=std::current_exception();}
       out.public_key_g2_right_msm_ms=elapsed(right_start,Clock::now());
-      for(auto& worker:workers)worker.join();for(const auto& error:errors)if(error)std::rethrow_exception(error);
+      workers.clear();for(const auto& error:errors)if(error)std::rethrow_exception(error);
       out.Y_pk=add(g2_left,g2_right);
       out.public_key_g2_msm_ms=std::max(out.public_key_g2_left_msm_ms,out.public_key_g2_right_msm_ms);
     }else{
       std::exception_ptr worker_error;
-      std::thread g1_worker([&]{const auto start=Clock::now();try{out.Y_M=msm(message_points,sw);}
+      std::jthread g1_worker([&]{const auto start=Clock::now();try{out.Y_M=msm(message_points,sw);}
         catch(...){worker_error=std::current_exception();}out.message_g1_msm_ms=elapsed(start,Clock::now());});
-      const auto g2_start=Clock::now();try{out.Y_pk=msm(s.public_keys,tw);}
-      catch(...){g1_worker.join();throw;}out.public_key_g2_msm_ms=elapsed(g2_start,Clock::now());
+      const auto g2_start=Clock::now();out.Y_pk=msm(s.public_keys,tw);
+      out.public_key_g2_msm_ms=elapsed(g2_start,Clock::now());
       g1_worker.join();if(worker_error)std::rethrow_exception(worker_error);
     }
     out.public_input_msm_wall_ms=elapsed(msm_wall_start,Clock::now());tick=Clock::now();
-    const double transcript_before_application=tr.timing_ms();
+    const double transcript_before_application=replay.timing_ms();
     DoryTarget im{pair(out.Y_M,p.Lprime),v.cm_M,pair(v.R_Gamma,p.Lprime)};
     DoryTarget ip{pair(p.L,out.Y_pk),pair(p.L,v.R_Lambda),v.cm_pk};
-    DoryTarget it{v.T,v.cm_M,v.cm_pk};absorb_targets(tr,im,ip,it);
+    DoryTarget it{v.T,v.cm_M,v.cm_pk};
     SymbolicTarget sim{symbolic_atom(arena,im.D0),symbolic_atom(arena,im.D1),symbolic_atom(arena,im.D2)};
     SymbolicTarget sip{symbolic_atom(arena,ip.D0),symbolic_atom(arena,ip.D1),symbolic_atom(arena,ip.D2)};
     SymbolicTarget sit{symbolic_atom(arena,it.D0),symbolic_atom(arena,it.D1),symbolic_atom(arena,it.D2)};
-    tr.absorb("bls-agg-bf/application-u1",0,serialize(v.U1));const Fr eta=tr.challenge_nonzero("bls-agg-bf/application-eta",0);
-    auto agg=symbolic_batch(arena,sim,sip,v.U1,eta);tr.absorb("bls-agg-bf/application-u2",0,serialize(v.U2));
-    const Fr zeta=tr.challenge_nonzero("bls-agg-bf/application-zeta",0);agg=symbolic_batch(arena,agg,sit,v.U2,zeta);
+    const auto [eta,zeta]=replay.application(im,ip,it,v);
+    auto agg=symbolic_batch(arena,sim,sip,v.U1,eta);
+    agg=symbolic_batch(arena,agg,sit,v.U2,zeta);
     out.eta=eta;out.zeta=zeta;if(capture_intermediates)out.accumulator_targets.push_back(symbolic_evaluate(arena,agg));
-    tock=Clock::now();out.application_batching_ms=elapsed(tick,tock)-(tr.timing_ms()-transcript_before_application);tick=Clock::now();
-    const double transcript_before_dory=tr.timing_ms();
+    tock=Clock::now();out.application_batching_ms=elapsed(tick,tock)-(replay.timing_ms()-transcript_before_application);tick=Clock::now();
+    const double transcript_before_dory=replay.timing_ms();
     out.dory_beta.resize(p.d);out.dory_alpha.resize(p.d);out.insert_g1_gamma.resize(p.d);out.insert_g2_gamma.resize(p.d);
     for(std::size_t j=1;j<=p.d;++j){const auto&step=v.dory_steps[j-1];
-      absorb_step_a(tr,j-1,step);const Fr beta=tr.challenge_nonzero("bls-agg-bf/dory-beta",j-1);
-      absorb_step_w(tr,j-1,step);const Fr alpha=tr.challenge_nonzero("bls-agg-bf/dory-alpha",j-1);
+      const auto [beta,alpha]=replay.dory_round(j-1,step);
       auto bar=symbolic_fold(arena,a,agg,step,j-1,beta,alpha);
       if(capture_intermediates)out.dory_fold_targets.push_back(symbolic_evaluate(arena,bar));
-      tr.absorb("bls-agg-bf/insert-g1-u",j,serialize(v.insert_g1_u[j-1]));
-      const Fr gg=tr.challenge_nonzero("bls-agg-bf/insert-g1-gamma",j);
+      const Fr gg=replay.insert_g1(j,v.insert_g1_u[j-1]);
       auto hat=symbolic_batch(arena,bar,g1[j],v.insert_g1_u[j-1],gg);
-      tr.absorb("bls-agg-bf/insert-g2-u",j,serialize(v.insert_g2_u[j-1]));
-      const Fr gl=tr.challenge_nonzero("bls-agg-bf/insert-g2-gamma",j);
+      const Fr gl=replay.insert_g2(j,v.insert_g2_u[j-1]);
       agg=symbolic_batch(arena,hat,g2[j],v.insert_g2_u[j-1],gl);
       out.dory_beta[j-1]=beta;out.dory_alpha[j-1]=alpha;out.insert_g1_gamma[j-1]=gg;out.insert_g2_gamma[j-1]=gl;
       if(capture_intermediates)out.accumulator_targets.push_back(symbolic_evaluate(arena,agg));
     }
-    tock=Clock::now();out.integrated_dory_ms=elapsed(tick,tock)-(tr.timing_ms()-transcript_before_dory);tick=Clock::now();
-    std::array<Bytes,2> final{serialize(v.Phi_final),serialize(v.Theta_final)};tr.absorb("bls-agg-bf/final-opening",0,final);
-    out.final_challenges_ms=0;out.transcript_hashing_ms=tr.timing_ms();
+    tock=Clock::now();out.integrated_dory_ms=elapsed(tick,tock)-(replay.timing_ms()-transcript_before_dory);tick=Clock::now();
+    replay.bind_final(v);
+    out.final_challenges_ms=0;out.transcript_hashing_ms=replay.timing_ms();
     const auto multiexp_start=Clock::now();
     if(capture_intermediates){
       out.final_dory=out.accumulator_targets.back();out.final_g1_rexp=out.g1_rexp_targets.back();
@@ -676,15 +698,14 @@ static VerificationTrace verify_online_symbolic_core(const ValidatedVerifierCont
       std::array<GT,5> values;std::array<std::exception_ptr,5> errors{};
       const std::array<const SymbolicGT*,5> expressions{
         &agg.D0,&agg.D1,&agg.D2,&g1[p.d].D1,&g2[p.d].D2};
-      std::vector<std::thread> workers;workers.reserve(4);
-      try{for(std::size_t i=0;i<4;++i)workers.emplace_back([&,i]{
+      std::vector<std::jthread> workers;workers.reserve(4);
+      for(std::size_t i=0;i<4;++i)workers.emplace_back([&,i]{
           try{values[i]=symbolic_evaluate(arena,*expressions[i]);}
           catch(...){errors[i]=std::current_exception();}
-        });}
-      catch(...){for(auto& worker:workers)worker.join();throw;}
+        });
       try{values[4]=symbolic_evaluate(arena,*expressions[4]);}
       catch(...){errors[4]=std::current_exception();}
-      for(auto& worker:workers)worker.join();
+      workers.clear();
       for(const auto& error:errors)if(error)std::rethrow_exception(error);
       out.final_dory={values[0],values[1],values[2]};
       out.final_g1_rexp.D1=values[3];out.final_g2_rexp.D2=values[4];
@@ -701,63 +722,69 @@ static VerificationTrace verify_online_symbolic_core(const ValidatedVerifierCont
 }
 
 VerificationTrace verify_online_diagnostic(const ValidatedVerifierContext&c,const Proof&p){
-  return verify_online_core(c,p,false,false);
+  return verify_online_core(c,p,false,MsmStrategy::Sequential);
 }
 bool verify_online(const ValidatedVerifierContext&c,const Proof&p){return verify_online_diagnostic(c,p).accepted;}
 VerificationTrace verify_online_diagnostic(const ValidatedVerifierContext&c,const ValidatedProof&p){
-  return verify_online_symbolic_core(c,p,false,true);
+  return verify_online_symbolic_core(c,p,false,MsmStrategy::SplitG2);
 }
 bool verify_online(const ValidatedVerifierContext&c,const ValidatedProof&p){
   return verify_online_diagnostic(c,p).accepted;
 }
 VerificationTrace verify_online_sequential_msm_diagnostic(
     const ValidatedVerifierContext&c,const ValidatedProof&p){
-  if(p.parameter_digest()!=c.parameters().digest)return {};
-  return verify_online_core(c,p.proof(),true,false);
+  if(!validated_proof_matches(c.parameters(),p))return {};
+  return verify_online_core(c,p.proof(),true,MsmStrategy::Sequential);
 }
 bool verify_online_sequential_msm(const ValidatedVerifierContext&c,const ValidatedProof&p){
   return verify_online_sequential_msm_diagnostic(c,p).accepted;
 }
 VerificationTrace verify_online_parallel_msm_diagnostic(
     const ValidatedVerifierContext&c,const ValidatedProof&p){
-  if(p.parameter_digest()!=c.parameters().digest)return {};
-  return verify_online_core(c,p.proof(),true,true);
+  if(!validated_proof_matches(c.parameters(),p))return {};
+  return verify_online_core(c,p.proof(),true,MsmStrategy::Parallel);
 }
 bool verify_online_parallel_msm(const ValidatedVerifierContext&c,const ValidatedProof&p){
   return verify_online_parallel_msm_diagnostic(c,p).accepted;
 }
 VerificationTrace verify_online_symbolic_gt_diagnostic(
     const ValidatedVerifierContext&c,const ValidatedProof&p){
-  return verify_online_symbolic_core(c,p,false,false);
+  return verify_online_symbolic_core(c,p,false,MsmStrategy::Parallel);
 }
 bool verify_online_symbolic_gt(const ValidatedVerifierContext&c,const ValidatedProof&p){
   return verify_online_symbolic_gt_diagnostic(c,p).accepted;
 }
 VerificationTrace verify_online_symbolic_gt_differential_trace(
     const ValidatedVerifierContext&c,const ValidatedProof&p){
-  return verify_online_symbolic_core(c,p,true);
+  return verify_online_symbolic_core(c,p,true,MsmStrategy::Parallel);
 }
 VerificationTrace verify_online_split_g2_msm_diagnostic(
     const ValidatedVerifierContext&c,const ValidatedProof&p){
-  return verify_online_diagnostic(c,p);
+  return verify_online_symbolic_core(c,p,false,MsmStrategy::SplitG2);
 }
 bool verify_online_split_g2_msm(const ValidatedVerifierContext&c,const ValidatedProof&p){
-  return verify_online(c,p);
+  return verify_online_split_g2_msm_diagnostic(c,p).accepted;
 }
 bool verify_safe(const PublicParameters&p,const Precomputation&a,const Statement&s,const Proof&v){
   auto c=prepare_verifier_context(p,a,s);return c&&verify_online(*c,v);
 }
 bool direct_bls_verify(const PublicParameters&p,const Statement&s){
-  try{if(!statement_shape(p,s))return false;return pair(s.sigma_agg,p.H)==direct_pairing_product(hash_messages(p,s),s.public_keys);}
+  try{if(!internal::valid_public_parameters(p)||!internal::valid_statement(p,s))return false;return pair(s.sigma_agg,p.H)==direct_pairing_product(hash_messages(p,s),s.public_keys);}
   catch(...){return false;}
 }
 std::size_t proof_payload_bytes(const Proof&p){
-  std::size_t n=serialize(p.cm_M).size()+serialize(p.cm_pk).size()+serialize(p.T).size();
-  for(const auto&c:p.g1_rexp_claims)n+=serialize(c.E).size()+serialize(c.F).size()+serialize(c.TL).size()+serialize(c.TR).size();
-  for(const auto&c:p.g2_rexp_claims)n+=serialize(c.E).size()+serialize(c.F).size()+serialize(c.TL).size()+serialize(c.TR).size();
-  n+=serialize(p.R_Gamma).size()+serialize(p.R_Lambda).size()+serialize(p.U1).size()+serialize(p.U2).size();
-  for(const auto&s:p.dory_steps)n+=serialize(s.A1L).size()+serialize(s.A1R).size()+serialize(s.A2L).size()+serialize(s.A2R).size()+serialize(s.W1).size()+serialize(s.W2).size();
-  for(const auto&x:p.insert_g1_u)n+=serialize(x).size();for(const auto&x:p.insert_g2_u)n+=serialize(x).size();
-  return n+serialize(p.Phi_final).size()+serialize(p.Theta_final).size();
+  std::size_t n=0;
+  const auto include=[&n](const auto& value){
+    std::size_t next{};
+    if(!internal::checked_add(n,serialize(value).size(),next))throw std::overflow_error("proof payload size");
+    n=next;
+  };
+  include(p.cm_M);include(p.cm_pk);include(p.T);
+  for(const auto&c:p.g1_rexp_claims){include(c.E);include(c.F);include(c.TL);include(c.TR);}
+  for(const auto&c:p.g2_rexp_claims){include(c.E);include(c.F);include(c.TL);include(c.TR);}
+  include(p.R_Gamma);include(p.R_Lambda);include(p.U1);include(p.U2);
+  for(const auto&s:p.dory_steps){include(s.A1L);include(s.A1R);include(s.A2L);include(s.A2R);include(s.W1);include(s.W2);}
+  for(const auto&x:p.insert_g1_u)include(x);for(const auto&x:p.insert_g2_u)include(x);
+  include(p.Phi_final);include(p.Theta_final);return n;
 }
 }
