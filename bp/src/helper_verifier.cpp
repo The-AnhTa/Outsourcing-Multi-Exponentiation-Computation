@@ -3,6 +3,8 @@
 #include "bp_internal.hpp"
 #include "hp_vme_internal.hpp"
 #include "hv_internal.hpp"
+#include "internal/protocol_utils.hpp"
+#include "internal/protocol_validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +15,36 @@
 #include <string_view>
 
 namespace bp {
+
+namespace internal {
+
+struct HvPreparedStatementCacheAccess {
+  static bool load(const HvPreparedStatementCache& cache,
+                   const HvPublicParams& pp, const Digest& context,
+                   hv_internal::PreparedStatement& prepared) {
+    if (!cache.ready_ || cache.crs_digest_ != pp.crs_digest ||
+        cache.statement_context_ != context || cache.z_v_.size() != pp.N ||
+        !valid_group(cache.X0_))
+      return false;
+    prepared.z_v = cache.z_v_;
+    prepared.X0 = cache.X0_;
+    prepared.context = cache.statement_context_;
+    return true;
+  }
+
+  static void store(HvPreparedStatementCache& cache,
+                    const HvPublicParams& pp,
+                    const hv_internal::PreparedStatement& prepared) {
+    cache.ready_ = true;
+    cache.crs_digest_ = pp.crs_digest;
+    cache.statement_context_ = prepared.context;
+    cache.z_v_ = prepared.z_v;
+    cache.X0_ = prepared.X0;
+  }
+};
+
+}  // namespace internal
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -22,70 +54,22 @@ double milliseconds(Clock::time_point start) {
       Clock::now() - start).count();
 }
 
-Bytes u64be(std::uint64_t value) {
-  Bytes out;
-  for (int shift = 56; shift >= 0; shift -= 8)
-    out.push_back(static_cast<std::uint8_t>(value >> shift));
-  return out;
-}
+using internal::exact_log2;
+using internal::fmul;
+using internal::fneg;
+using internal::frame;
+using internal::gadd;
+using internal::gmul;
+using internal::msm;
+using internal::power_of_two;
+using internal::u64be;
+using internal::valid_group;
 
 void raw(Bytes& out, std::span<const std::uint8_t> value) {
-  out.insert(out.end(), value.begin(), value.end());
-}
-
-void frame(Bytes& out, std::span<const std::uint8_t> value) {
-  raw(out, u64be(value.size()));
-  raw(out, value);
-}
-
-void frame(Bytes& out, std::string_view value) {
-  frame(out, {reinterpret_cast<const std::uint8_t*>(value.data()),
-              value.size()});
-}
-
-bool power_of_two(std::size_t n) { return n && !(n & (n - 1)); }
-
-std::size_t exact_log2(std::size_t n) {
-  if (!power_of_two(n))
-    throw std::invalid_argument("dimension must be a power of two");
-  std::size_t d = 0;
-  while (n > 1) { n >>= 1; ++d; }
-  return d;
-}
-
-Scalar fmul(const Scalar& a, const Scalar& b) {
-  Scalar out; Scalar::mul(out, a, b); return out;
-}
-
-Scalar fneg(const Scalar& a) {
-  Scalar out; Scalar::neg(out, a); return out;
+  internal::append_raw(out, value);
 }
 
 Scalar fone() { Scalar out; out = 1; return out; }
-
-Group gadd(const Group& a, const Group& b) {
-  Group out; Group::add(out, a, b); return out;
-}
-
-Group gmul(const Group& point, const Scalar& scalar) {
-  Group out; Group::mul(out, point, scalar); return out;
-}
-
-Group msm(std::span<const Group> points, std::span<const Scalar> scalars) {
-  if (points.size() != scalars.size())
-    throw std::invalid_argument("MSM length mismatch");
-  Group out; out.clear();
-  if (!points.empty()) {
-    std::vector<Group> work(points.begin(), points.end());
-    Group::mulVec(out, work.data(), scalars.data(), work.size());
-  }
-  return out;
-}
-
-bool valid_group(const Group& point, bool nonidentity = false) {
-  return point.isValid() && point.isValidOrder() &&
-         (!nonidentity || !point.isZero());
-}
 
 Digest bp_parameter_digest(const PublicParams& pp) {
   Bytes input;
@@ -148,31 +132,17 @@ Digest hv_context(const HvPublicParams& pp, const HvStatement& statement) {
 }
 
 bool valid_statement(const HvPublicParams& pp, const HvStatement& statement) {
-  if (!valid_group(statement.Z) ||
-      statement.bulletproof.rounds.size() != pp.bp.d)
-    return false;
-  for (const auto& round : statement.bulletproof.rounds)
-    if (!valid_group(round.A) || !valid_group(round.B)) return false;
-  return true;
+  return internal::validate_hv_statement_shape(pp, statement);
 }
 
 bool fast_binding(const HvPublicParams& pp, const VmePrecomputation& vme,
                   const Digest& precomp_crs) {
   try {
-    if (!validate_public_params(pp.bp) ||
-        pp.bp.n > std::numeric_limits<std::size_t>::max() / 2 ||
-        pp.N != 2 * pp.bp.n || pp.vme.dimension != pp.N ||
-        pp.vme.log_dimension != pp.bp.d + 1 ||
-        pp.vme.transcript_domain != kHvVmeDomain ||
-        pp.vme.fixed_P.size() != pp.N ||
+    if (!internal::validate_hv_public_params_shape(pp) ||
         pp.bp_parameter_digest != bp_parameter_digest(pp.bp) ||
         pp.P_digest != p_digest(pp) ||
         precomp_crs != pp.crs_digest)
       return false;
-    for (std::size_t i = 0; i < pp.bp.n; ++i)
-      if (pp.vme.fixed_P[i] != pp.bp.G[i] ||
-          pp.vme.fixed_P[pp.bp.n + i] != pp.bp.H[i])
-        return false;
     return hv_crs_digest(pp) == pp.crs_digest &&
            hp_internal::validate_vme_precomputation_binding(pp.vme, vme);
   } catch (...) { return false; }
@@ -180,13 +150,7 @@ bool fast_binding(const HvPublicParams& pp, const VmePrecomputation& vme,
 
 bool online_binding(const HvPublicParams& pp,
                     const HvVerifierPrecomputation& pre) {
-  return power_of_two(pp.bp.n) && pp.bp.d == exact_log2(pp.bp.n) &&
-         pp.bp.n <= std::numeric_limits<std::size_t>::max() / 2 &&
-         pp.N == 2 * pp.bp.n && pp.bp.G.size() == pp.bp.n &&
-         pp.bp.H.size() == pp.bp.n && pp.vme.dimension == pp.N &&
-         pp.vme.log_dimension == pp.bp.d + 1 &&
-         pp.vme.fixed_P.size() == pp.N &&
-         pp.vme.transcript_domain == kHvVmeDomain &&
+  return internal::validate_hv_public_params_shape(pp) &&
          pre.crs_digest == pp.crs_digest &&
          pre.bp_parameter_digest == pp.bp_parameter_digest &&
          pre.bp_transcript_parameter_digest ==
@@ -293,29 +257,17 @@ bool prepare(const HvPublicParams& pp, const HvStatement& statement,
 }
 
 bool canonical_group(std::span<const std::uint8_t> bytes, Group& out) {
-  Group value;
-  if (bytes.size() != group_bytes() ||
-      value.deserialize(bytes.data(), bytes.size()) != bytes.size() ||
-      !valid_group(value) ||
-      serialize(value) != Bytes(bytes.begin(), bytes.end()))
-    return false;
-  out = value;
-  return true;
+  return internal::canonical_group(bytes, out);
 }
 
 bool canonical_scalar(std::span<const std::uint8_t> bytes, Scalar& out) {
-  Scalar value;
-  if (bytes.size() != scalar_bytes() ||
-      value.deserialize(bytes.data(), bytes.size()) != bytes.size() ||
-      serialize(value) != Bytes(bytes.begin(), bytes.end()))
-    return false;
-  out = value;
-  return true;
+  return internal::canonical_scalar(bytes, out);
 }
 
 std::uint64_t read_u64(std::span<const std::uint8_t> bytes, std::size_t pos) {
   std::uint64_t out = 0;
-  for (std::size_t i = 0; i < 8; ++i) out = (out << 8) | bytes[pos + i];
+  if (!internal::read_u64(bytes, pos, out))
+    throw std::out_of_range("truncated u64");
   return out;
 }
 
@@ -342,8 +294,7 @@ bool verify_impl(const HvPublicParams& pp,
     if (!online_binding(pp, pre) ||
         (!statement_prevalidated && !valid_statement(pp, statement)) ||
         (!proof_prevalidated &&
-         !hp_internal::validate_vme_proof_batched(
-             pp.vme, proof.vme_proof))) {
+         !internal::validate_hv_proof_shape(pp, proof, true))) {
       if (timings) {
         timings->validation_ms = milliseconds(validation_start);
         timings->total_ms = milliseconds(total_start);
@@ -358,20 +309,12 @@ bool verify_impl(const HvPublicParams& pp,
       const Digest current_context = hv_context(pp, statement);
       if (timings)
         timings->context_digest_ms = milliseconds(context_start);
-      if (cache->ready && cache->crs_digest == pp.crs_digest &&
-          cache->statement_context == current_context &&
-          cache->z_v.size() == pp.N) {
-        prepared.z_v = cache->z_v;
-        prepared.X0 = cache->X0;
-        prepared.context = cache->statement_context;
-      } else {
+      if (!internal::HvPreparedStatementCacheAccess::load(
+              *cache, pp, current_context, prepared)) {
         if (!prepare(pp, statement, prepared, timings, &current_context))
           return false;
-        cache->ready = true;
-        cache->crs_digest = pp.crs_digest;
-        cache->statement_context = prepared.context;
-        cache->z_v = prepared.z_v;
-        cache->X0 = prepared.X0;
+        internal::HvPreparedStatementCacheAccess::store(
+            *cache, pp, prepared);
       }
     } else if (!prepare(pp, statement, prepared, timings)) {
       return false;
@@ -566,16 +509,26 @@ HvInstance generate_helper_verifier_instance(const HvPublicParams& pp) {
 
 std::size_t hv_proof_payload_bytes(std::size_t n) {
   const std::size_t D = exact_log2(n) + 1;
-  return (11 * D - 4) * hp_internal::gt_bytes() +
-         2 * hp_internal::g1_bytes() + group_bytes();
+  std::size_t gt_count = 0, gt_total = 0, g1_total = 0, total = 0;
+  if (!internal::checked_mul(11, D, gt_count) || gt_count < 4 ||
+      !internal::checked_mul(gt_count - 4, hp_internal::gt_bytes(), gt_total) ||
+      !internal::checked_mul(2, hp_internal::g1_bytes(), g1_total) ||
+      !internal::checked_add(gt_total, g1_total, total) ||
+      !internal::checked_add(total, group_bytes(), total))
+    throw std::overflow_error("HV proof size overflow");
+  return total;
 }
 
 std::size_t hv_proof_wire_bytes(std::size_t n) {
-  return kHvHeader + hv_proof_payload_bytes(n);
+  std::size_t total = 0;
+  if (!internal::checked_add(kHvHeader, hv_proof_payload_bytes(n), total))
+    throw std::overflow_error("HV proof wire size overflow");
+  return total;
 }
 
 Bytes serialize_hv_proof(const HvPublicParams& pp, const HvProof& proof) {
-  if (!hp_internal::validate_vme_proof(pp.vme, proof.vme_proof))
+  if (!internal::validate_hv_public_params_shape(pp) ||
+      !internal::validate_hv_proof_shape(pp, proof, false))
     throw std::invalid_argument("invalid helper-verifier proof");
   Bytes out;
   out.reserve(hv_proof_wire_bytes(pp.bp.n));
@@ -597,14 +550,18 @@ Bytes serialize_hv_proof(const HvPublicParams& pp, const HvProof& proof) {
     raw(out, hp_internal::serialize_gt(U));
   raw(out, hp_internal::serialize_g1(proof.vme_proof.phi_final));
   raw(out, serialize(proof.vme_proof.theta_final));
+  if (out.size() != hv_proof_wire_bytes(pp.bp.n))
+    throw std::runtime_error("unexpected HV proof encoding size");
   return out;
 }
 
 bool deserialize_hv_proof(const HvPublicParams& pp,
                           std::span<const std::uint8_t> bytes,
                           HvProof& proof) noexcept {
+  proof = {};
   try {
-    if (bytes.size() != hv_proof_wire_bytes(pp.bp.n) ||
+    if (!internal::validate_hv_public_params_shape(pp) ||
+        bytes.size() != hv_proof_wire_bytes(pp.bp.n) ||
         !std::equal(kHvMagic.begin(), kHvMagic.end(), bytes.begin()) ||
         bytes[8] != static_cast<std::uint8_t>(kHvVersion >> 8) ||
         bytes[9] != static_cast<std::uint8_t>(kHvVersion) ||
@@ -664,12 +621,17 @@ bool deserialize_hv_proof(const HvPublicParams& pp,
 }
 
 std::size_t hv_statement_wire_bytes(std::size_t n) {
-  return kHvStatementHeader + group_bytes() + proof_wire_bytes(n);
+  std::size_t total = 0;
+  if (!internal::checked_add(kHvStatementHeader, group_bytes(), total) ||
+      !internal::checked_add(total, proof_wire_bytes(n), total))
+    throw std::overflow_error("HV statement wire size overflow");
+  return total;
 }
 
 Bytes serialize_hv_statement(const HvPublicParams& pp,
                              const HvStatement& statement) {
-  if (!valid_statement(pp, statement))
+  if (!internal::validate_hv_public_params_shape(pp) ||
+      !valid_statement(pp, statement))
     throw std::invalid_argument("invalid helper-verifier statement");
   Bytes out;
   out.reserve(hv_statement_wire_bytes(pp.bp.n));
@@ -679,14 +641,18 @@ Bytes serialize_hv_statement(const HvPublicParams& pp,
   raw(out, pp.crs_digest);
   raw(out, serialize(statement.Z));
   raw(out, serialize_proof(pp.bp, statement.bulletproof));
+  if (out.size() != hv_statement_wire_bytes(pp.bp.n))
+    throw std::runtime_error("unexpected HV statement encoding size");
   return out;
 }
 
 bool deserialize_hv_statement(const HvPublicParams& pp,
                               std::span<const std::uint8_t> bytes,
                               HvStatement& statement) noexcept {
+  statement = {};
   try {
-    if (bytes.size() != hv_statement_wire_bytes(pp.bp.n) ||
+    if (!internal::validate_hv_public_params_shape(pp) ||
+        bytes.size() != hv_statement_wire_bytes(pp.bp.n) ||
         !std::equal(kHvStatementMagic.begin(), kHvStatementMagic.end(),
                     bytes.begin()) ||
         bytes[8] != static_cast<std::uint8_t>(kHvVersion >> 8) ||

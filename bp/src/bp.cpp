@@ -1,7 +1,9 @@
 #include "bp/bp.hpp"
 #include "bp_internal.hpp"
 #include "benchmark_internal.hpp"
-#include "hp_transcript_internal.hpp"
+#include "internal/bp_transcript.hpp"
+#include "internal/protocol_utils.hpp"
+#include "internal/protocol_validation.hpp"
 
 #include <mcl/fp.hpp>
 #include <algorithm>
@@ -22,39 +24,14 @@ double elapsed_ms(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
-constexpr std::string_view kProtocol = "BP-IPA/BN254-G2/v1";
-constexpr std::string_view kAlphaDomain = "BP-IPA-ALPHA-v1";
-constexpr std::string_view kRoundDomain = "BP-IPA-ROUND-v1";
 constexpr std::array<std::uint8_t, 8> kProofMagic{
     'B','P','I','P','A','G','2','1'};
 constexpr std::uint16_t kProofVersion = 1;
 
-
-constexpr Digest kRejectionLimit = {
-    0xde,0xd4,0x5b,0x0d,0x80,0x00,0x00,0x0a,
-    0x5d,0x39,0xd1,0x00,0x00,0x00,0x00,0x2f,
-    0xfd,0xbd,0x00,0x00,0x00,0x00,0x00,0x63,
-    0xc6,0x00,0x00,0x00,0x00,0x00,0x00,0x4e};
-
-Bytes u64be(std::uint64_t value) {
-  Bytes out;
-  out.reserve(8);
-  for (int shift = 56; shift >= 0; shift -= 8)
-    out.push_back(static_cast<std::uint8_t>(value >> shift));
-  return out;
-}
+using internal::u64be;
 
 void append_raw(Bytes& out, std::span<const std::uint8_t> field) {
-  out.insert(out.end(), field.begin(), field.end());
-}
-
-void frame(Bytes& out, std::span<const std::uint8_t> field) {
-  append_raw(out, u64be(field.size()));
-  append_raw(out, field);
-}
-
-void frame(Bytes& out, std::string_view field) {
-  frame(out, {reinterpret_cast<const std::uint8_t*>(field.data()), field.size()});
+  internal::append_raw(out, field);
 }
 
 template<class T>
@@ -127,103 +104,8 @@ Group msm(std::span<const Group> points, std::span<const Scalar> scalars) {
   return out;
 }
 
-bool power_of_two(std::size_t n) { return n != 0 && (n & (n - 1)) == 0; }
-
 std::size_t log2_exact(std::size_t n) {
-  if (!power_of_two(n)) throw std::invalid_argument("dimension must be a power of two");
-  std::size_t d = 0;
-  while (n > 1) { n >>= 1; ++d; }
-  return d;
-}
-
-Digest public_params_digest(const PublicParams& pp) {
-  Bytes input;
-  frame(input, "BP-IPA-PUBLIC-PARAMS-v1");
-  frame(input, pp.group_identifier);
-  frame(input, pp.scalar_modulus);
-  frame(input, pp.hash_suite_identifier);
-  frame(input, pp.transcript_domain);
-  frame(input, u64be(pp.n));
-  frame(input, u64be(pp.d));
-  for (const auto& p : pp.G) frame(input, serialize(p));
-  for (const auto& p : pp.H) frame(input, serialize(p));
-  frame(input, serialize(pp.K));
-  return sha256(input);
-}
-
-class Transcript {
- public:
-  Transcript(const PublicParams& pp, const Group& Z,
-             const Digest* cached_public_parameter_digest = nullptr) {
-    if (pp.transcript_domain == kHpTranscriptDomain) {
-      hp_.emplace(pp, Z);
-      return;
-    }
-    Bytes input;
-    frame(input, kProtocol);
-    frame(input, pp.transcript_domain);
-    frame(input, pp.group_identifier);
-    frame(input, pp.scalar_modulus);
-    frame(input, pp.hash_suite_identifier);
-    frame(input, cached_public_parameter_digest
-                     ? *cached_public_parameter_digest
-                     : public_params_digest(pp));
-    frame(input, serialize(Z));
-    state_ = sha256(input);
-  }
-
-  Scalar round(std::size_t k, const Group& A, const Group& B) {
-    if (hp_) return hp_->round(k, A, B);
-    Bytes message;
-    frame(message, kRoundDomain);
-    frame(message, state_);
-    frame(message, u64be(k));
-    frame(message, serialize(A));
-    frame(message, serialize(B));
-    const Digest round_state = sha256(message);
-    Scalar alpha = hash_to_nonzero(round_state);
-    Bytes next;
-    frame(next, kProtocol);
-    frame(next, round_state);
-    frame(next, serialize(alpha));
-    state_ = sha256(next);
-    return alpha;
-  }
-
- private:
-  static Scalar hash_to_nonzero(const Digest& input) {
-    for (std::uint64_t counter = 0;; ++counter) {
-      Bytes candidate;
-      frame(candidate, kAlphaDomain);
-      frame(candidate, input);
-      frame(candidate, u64be(counter));
-      const Digest hash = sha256(candidate);
-      if (!std::lexicographical_compare(
-              hash.begin(), hash.end(), kRejectionLimit.begin(), kRejectionLimit.end()))
-        continue;
-      Scalar out;
-      out.setBigEndianMod(hash.data(), hash.size());
-      if (!out.isZero()) return out;
-    }
-  }
-
-  Digest state_{};
-  std::optional<hp_internal::HpBpTranscript> hp_;
-};
-
-Group setup_base(std::string_view domain, std::span<const std::uint8_t> seed,
-                 std::uint64_t index, bool has_index) {
-  for (std::uint64_t counter = 0;; ++counter) {
-    Bytes input;
-    frame(input, kProtocol);
-    frame(input, domain);
-    frame(input, seed);
-    if (has_index) frame(input, u64be(index));
-    frame(input, u64be(counter));
-    Group out;
-    mcl::bn::hashAndMapToG2(out, input.data(), input.size());
-    if (valid_group(out, true)) return out;
-  }
+  return internal::exact_log2(n);
 }
 
 std::vector<Scalar> fold_scalars(std::span<const Scalar> left,
@@ -253,38 +135,18 @@ Group relation(std::span<const Group> G, std::span<const Group> H,
 }
 
 bool canonical_scalar(std::span<const std::uint8_t> bytes, Scalar& out) {
-  Scalar candidate;
-  if (bytes.size() != scalar_bytes() ||
-      candidate.deserialize(bytes.data(), bytes.size()) != bytes.size() ||
-      serialize(candidate) != Bytes(bytes.begin(), bytes.end()))
-    return false;
-  out = candidate;
-  return true;
+  return internal::canonical_scalar(bytes, out);
 }
 
 bool canonical_group(std::span<const std::uint8_t> bytes, Group& out) {
-  Group candidate;
-  if (bytes.size() != group_bytes() ||
-      candidate.deserialize(bytes.data(), bytes.size()) != bytes.size() ||
-      !valid_group(candidate, false) ||
-      serialize(candidate) != Bytes(bytes.begin(), bytes.end()))
-    return false;
-  out = candidate;
-  return true;
+  return internal::canonical_group(bytes, out);
 }
 
 std::uint64_t read_u64(std::span<const std::uint8_t> bytes, std::size_t pos) {
   std::uint64_t out = 0;
-  for (std::size_t i = 0; i < 8; ++i) out = (out << 8) | bytes[pos + i];
+  if (!internal::read_u64(bytes, pos, out))
+    throw std::out_of_range("truncated u64");
   return out;
-}
-
-bool valid_typed_proof_inputs(const PublicParams& pp, const Group& Z,
-                              const Proof& proof) {
-  if (!valid_group(Z, false) || proof.rounds.size() != pp.d) return false;
-  for (const auto& round : proof.rounds)
-    if (!valid_group(round.A, false) || !valid_group(round.B, false)) return false;
-  return true;
 }
 
 bool verify_core(const PublicParams& pp, const Group& Z, const Proof& proof,
@@ -298,7 +160,7 @@ bool verify_core(const PublicParams& pp, const Group& Z, const Proof& proof,
     active_profile->initial_allocation_copy_ms += elapsed_ms(copy_start);
 
   const auto transcript_start = Clock::now();
-  Transcript transcript(pp, Z);
+  internal::BpTranscript transcript(pp, Z);
   if (active_profile)
     active_profile->transcript_challenge_ms += elapsed_ms(transcript_start);
 
@@ -384,31 +246,18 @@ PublicParams Setup(std::size_t n, std::span<const std::uint8_t> public_seed) {
   pp.G.reserve(n);
   pp.H.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
-    pp.G.push_back(setup_base("BP-IPA-G-v1", public_seed, i, true));
-    pp.H.push_back(setup_base("BP-IPA-H-v1", public_seed, i, true));
+    pp.G.push_back(internal::derive_bp_generator(
+        "BP-IPA-G-v1", public_seed, i, true));
+    pp.H.push_back(internal::derive_bp_generator(
+        "BP-IPA-H-v1", public_seed, i, true));
   }
-  pp.K = setup_base("BP-IPA-K-v1", public_seed, 0, false);
+  pp.K = internal::derive_bp_generator(
+      "BP-IPA-K-v1", public_seed, 0, false);
   return pp;
 }
 
 bool validate_public_params(const PublicParams& pp) noexcept {
-  try {
-    initialize();
-    const bool standard_transcript =
-        pp.transcript_domain == kTranscriptDomain && !pp.transcript_crs_digest;
-    const bool hp_transcript =
-        pp.transcript_domain == kHpTranscriptDomain && pp.transcript_crs_digest.has_value();
-    if (!power_of_two(pp.n) || pp.d != log2_exact(pp.n) ||
-        pp.G.size() != pp.n || pp.H.size() != pp.n ||
-        pp.group_identifier != kGroupIdentifier ||
-        pp.scalar_modulus != kScalarModulus ||
-        pp.hash_suite_identifier != kHashSuiteIdentifier ||
-        (!standard_transcript && !hp_transcript))
-      return false;
-    for (const auto& p : pp.G) if (!valid_group(p, true)) return false;
-    for (const auto& p : pp.H) if (!valid_group(p, true)) return false;
-    return valid_group(pp.K, true);
-  } catch (...) { return false; }
+  return internal::validate_bp_public_params(pp);
 }
 
 Group commit(const PublicParams& pp, std::span<const Scalar> x,
@@ -441,7 +290,7 @@ Proof Prove(const PublicParams& pp, const Group& Z,
     active_profile->initial_allocation_copy_ms += elapsed_ms(copy_start);
 
   const auto transcript_start = Clock::now();
-  Transcript transcript(pp, Z);
+  internal::BpTranscript transcript(pp, Z);
   if (active_profile)
     active_profile->transcript_challenge_ms += elapsed_ms(transcript_start);
   Proof proof;
@@ -501,7 +350,8 @@ bool Verify(const PublicParams& pp, const Group& Z, const Proof& proof,
     if (active_profile)
       active_profile->public_parameter_validation_ms += elapsed_ms(validation_start);
     const auto proof_validation_start = Clock::now();
-    const bool valid_proof = valid_pp && valid_typed_proof_inputs(pp, Z, proof);
+    const bool valid_proof =
+        valid_pp && internal::validate_bp_proof_shape(pp, Z, proof);
     if (active_profile)
       active_profile->proof_parsing_validation_ms += elapsed_ms(proof_validation_start);
     if (!valid_proof) return false;
@@ -511,11 +361,20 @@ bool Verify(const PublicParams& pp, const Group& Z, const Proof& proof,
 
 std::size_t proof_payload_bytes(std::size_t n) {
   const auto d = log2_exact(n);
-  return 2 * d * group_bytes() + 2 * scalar_bytes();
+  std::size_t rounds = 0, finals = 0, total = 0;
+  if (!internal::checked_mul(d, 2, rounds) ||
+      !internal::checked_mul(rounds, group_bytes(), rounds) ||
+      !internal::checked_mul(2, scalar_bytes(), finals) ||
+      !internal::checked_add(rounds, finals, total))
+    throw std::overflow_error("proof size overflow");
+  return total;
 }
 
 std::size_t proof_wire_bytes(std::size_t n) {
-  return 26 + proof_payload_bytes(n);
+  std::size_t total = 0;
+  if (!internal::checked_add(26, proof_payload_bytes(n), total))
+    throw std::overflow_error("proof wire size overflow");
+  return total;
 }
 
 Bytes serialize_proof(const PublicParams& pp, const Proof& proof) {
@@ -537,11 +396,14 @@ Bytes serialize_proof(const PublicParams& pp, const Proof& proof) {
   }
   append_raw(out, serialize(proof.x_final));
   append_raw(out, serialize(proof.y_final));
+  if (out.size() != proof_wire_bytes(pp.n))
+    throw std::runtime_error("unexpected proof encoding size");
   return out;
 }
 
 bool deserialize_proof(const PublicParams& pp, std::span<const std::uint8_t> bytes,
                        Proof& proof) noexcept {
+  proof = {};
   try {
     const auto pp_validation_start = Clock::now();
     const bool valid_pp = validate_public_params(pp);
@@ -567,6 +429,8 @@ bool deserialize_proof(const PublicParams& pp, std::span<const std::uint8_t> byt
     if (!canonical_scalar(bytes.subspan(pos, sb), candidate.x_final)) return false;
     pos += sb;
     if (!canonical_scalar(bytes.subspan(pos, sb), candidate.y_final)) return false;
+    pos += sb;
+    if (pos != bytes.size()) return false;
     proof = std::move(candidate);
     if (active_profile)
       active_profile->proof_parsing_validation_ms += elapsed_ms(proof_start);
@@ -583,7 +447,7 @@ bool VerifySerialized(const PublicParams& pp, const Group& Z,
 namespace internal {
 
 Digest bp_public_parameter_digest(const PublicParams& pp) {
-  return public_params_digest(pp);
+  return bp_transcript_parameter_digest(pp);
 }
 
 bool replay_bp_challenges_prevalidated(
@@ -593,7 +457,7 @@ bool replay_bp_challenges_prevalidated(
   try {
     challenges.clear();
     if (proof.rounds.size() != pp.d) return false;
-    Transcript transcript(pp, Z, &parameter_digest);
+    BpTranscript transcript(pp, Z, &parameter_digest);
     challenges.reserve(pp.d);
     for (std::size_t round = 0; round < pp.d; ++round)
       challenges.push_back(transcript.round(
@@ -611,7 +475,7 @@ bool replay_bp_challenges_prevalidated(
   try {
     challenges.clear();
     if (proof.rounds.size() != pp.d) return false;
-    Transcript transcript(pp, Z);
+    BpTranscript transcript(pp, Z);
     challenges.reserve(pp.d);
     for (std::size_t round = 0; round < pp.d; ++round)
       challenges.push_back(transcript.round(
@@ -629,7 +493,7 @@ bool replay_bp_challenges(const PublicParams& pp, const Group& Z,
   try {
     challenges.clear();
     if (!validate_public_params(pp) ||
-        !valid_typed_proof_inputs(pp, Z, proof))
+        !internal::validate_bp_proof_shape(pp, Z, proof))
       return false;
     return replay_bp_challenges_prevalidated(
         pp, Z, proof, challenges);
@@ -719,7 +583,8 @@ bool PrevalidateVerification(const PublicParams& pp, const Group& Z,
                              PrevalidatedVerification& output) noexcept {
   output = {};
   try {
-    if (!validate_public_params(pp) || !valid_typed_proof_inputs(pp, Z, proof))
+    if (!validate_public_params(pp) ||
+        !internal::validate_bp_proof_shape(pp, Z, proof))
       return false;
     output = {&pp, &Z, &proof};
     return true;

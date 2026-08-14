@@ -1,4 +1,5 @@
 #include "hp_vme_internal.hpp"
+#include "internal/protocol_utils.hpp"
 
 #include <mcl/fp.hpp>
 #include <mcl/gmp_util.hpp>
@@ -27,24 +28,17 @@ double ms(Clock::time_point a, Clock::time_point b = Clock::now()) {
   return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
-Bytes u64be(std::uint64_t value) {
-  Bytes out;
-  for (int shift = 56; shift >= 0; shift -= 8)
-    out.push_back(static_cast<std::uint8_t>(value >> shift));
-  return out;
-}
+using bp::internal::exact_log2;
+using bp::internal::fadd;
+using bp::internal::finv;
+using bp::internal::fmul;
+using bp::internal::fneg;
+using bp::internal::frame;
+using bp::internal::power_of_two;
+using bp::internal::u64be;
 
 void raw(Bytes& out, std::span<const std::uint8_t> field) {
-  out.insert(out.end(), field.begin(), field.end());
-}
-
-void frame(Bytes& out, std::span<const std::uint8_t> field) {
-  raw(out, u64be(field.size()));
-  raw(out, field);
-}
-
-void frame(Bytes& out, std::string_view field) {
-  frame(out, {reinterpret_cast<const std::uint8_t*>(field.data()), field.size()});
+  bp::internal::append_raw(out, field);
 }
 
 template<class T>
@@ -56,40 +50,14 @@ Bytes encode(const T& value) {
   return out;
 }
 
-bool power_of_two(std::size_t n) { return n && !(n & (n - 1)); }
-
-std::size_t exact_log2(std::size_t n) {
-  if (!power_of_two(n)) throw std::invalid_argument("dimension is not a power of two");
-  std::size_t d = 0;
-  while (n > 1) { n >>= 1; ++d; }
-  return d;
-}
-
-Scalar fadd(const Scalar& a, const Scalar& b) {
-  Scalar out; Scalar::add(out, a, b); return out;
-}
-Scalar fmul(const Scalar& a, const Scalar& b) {
-  Scalar out; Scalar::mul(out, a, b); return out;
-}
-Scalar finv(const Scalar& a) {
-  if (a.isZero()) throw std::invalid_argument("zero scalar inversion");
-  Scalar out; Scalar::inv(out, a); return out;
-}
-Scalar fneg(const Scalar& a) {
-  Scalar out; Scalar::neg(out, a); return out;
-}
 G1 g1add(const G1& a, const G1& b) {
   G1 out; G1::add(out, a, b); return out;
 }
 G1 g1mul(const G1& p, const Scalar& x) {
   G1 out; G1::mul(out, p, x); return out;
 }
-Group g2add(const Group& a, const Group& b) {
-  Group out; Group::add(out, a, b); return out;
-}
-Group g2mul(const Group& p, const Scalar& x) {
-  Group out; Group::mul(out, p, x); return out;
-}
+Group g2add(const Group& a, const Group& b) { return bp::internal::gadd(a, b); }
+Group g2mul(const Group& p, const Scalar& x) { return bp::internal::gmul(p, x); }
 GT gtmul(const GT& a, const GT& b) {
   GT out; GT::mul(out, a, b); return out;
 }
@@ -109,7 +77,7 @@ bool valid_g1(const G1& p, bool nonidentity = false) {
   return p.isValid() && p.isValidOrder() && (!nonidentity || !p.isZero());
 }
 bool valid_g2(const Group& p, bool nonidentity = false) {
-  return p.isValid() && p.isValidOrder() && (!nonidentity || !p.isZero());
+  return bp::internal::valid_group(p, nonidentity);
 }
 
 bool valid_gt(const GT& value) {
@@ -306,20 +274,20 @@ VmeRexpClaims fixed_rexp_claim(const VmePrecomputation& pre) {
   return {pre.delta1R[0], pre.delta2R[0], pre.pairing_x[1], pre.delta1R[0]};
 }
 
-struct Phase1 {
+struct RexpPhaseOutput {
   VmeStatement statement;
   std::vector<Scalar> rho;
   std::vector<Scalar> r;
   std::vector<VmeRexpClaims> claims;
   std::vector<FreshInstance> fresh;
   G1 R;
-  Digest transcript_state{};
 };
 
-Phase1 prove_phase1(const VmePublicParams& pp, const VmePrecomputation& pre,
-                    const Digest& context, const Group& X,
-                    std::span<const Scalar> z) {
-  Phase1 out;
+RexpPhaseOutput prove_rexp_phase(const VmePublicParams& pp,
+                                const VmePrecomputation& pre,
+                                const Digest& context, const Group& X,
+                                std::span<const Scalar> z) {
+  RexpPhaseOutput out;
   out.statement.application_context = context;
   out.statement.X = X;
   out.statement.z.assign(z.begin(), z.end());
@@ -370,26 +338,31 @@ Phase1 prove_phase1(const VmePublicParams& pp, const VmePrecomputation& pre,
   out.r.resize(pp.log_dimension);
   for (std::size_t j = 0; j < pp.log_dimension; ++j)
     out.r[pp.log_dimension - j - 1] = out.rho[j];
+  if (out.fresh.size() != pp.log_dimension + 1 ||
+      out.r.size() != pp.log_dimension ||
+      out.claims.size() + 1 != pp.log_dimension)
+    throw std::runtime_error("invalid REXP phase output");
   return out;
 }
 
-VmeProof prove_phase2(const VmePublicParams& pp, const VmePrecomputation& pre,
-                      const Phase1& phase1) {
+VmeProof prove_dory_phase(const VmePublicParams& pp,
+                          const VmePrecomputation& pre,
+                          const RexpPhaseOutput& rexp) {
   VmeProof proof;
-  proof.rexp_claims = phase1.claims;
-  proof.R = phase1.R;
+  proof.rexp_claims = rexp.claims;
+  proof.R = rexp.R;
   proof.dory_folds.reserve(pp.log_dimension);
   proof.batch_U.reserve(pp.log_dimension);
-  VmeTranscript transcript(phase1.statement.digest);
+  VmeTranscript transcript(rexp.statement.digest);
   for (std::size_t j = 0; j < pp.log_dimension; ++j) {
     const VmeRexpClaims claims =
-        j == 0 ? fixed_rexp_claim(pre) : phase1.claims[j - 1];
+        j == 0 ? fixed_rexp_claim(pre) : rexp.claims[j - 1];
     absorb_rexp(transcript, j, pp.dimension >> j, claims);
     (void)transcript.challenge("BPVME/HP/VME/REXP-RHO/v1", j);
   }
-  transcript.absorb("BPVME/HP/VME/REXP-R/v1", serialize_g1(phase1.R));
-  const auto tensor = tensor_vector(phase1.r);
-  const Scalar q = inner(tensor, phase1.statement.z);
+  transcript.absorb("BPVME/HP/VME/REXP-R/v1", serialize_g1(rexp.R));
+  const auto tensor = tensor_vector(rexp.r);
+  const Scalar q = inner(tensor, rexp.statement.z);
   std::array<Bytes, 3> initial{u64be(pp.log_dimension), u64be(pp.dimension),
                                serialize(q)};
   transcript.absorb("BPVME/HP/VME/DORY-INITIAL/v1", initial);
@@ -398,12 +371,12 @@ VmeProof prove_phase2(const VmePublicParams& pp, const VmePrecomputation& pre,
   std::vector<Group> theta;
   phi.reserve(pp.dimension); theta.reserve(pp.dimension);
   for (std::size_t i = 0; i < pp.dimension; ++i) {
-    phi.push_back(g1mul(pp.L, phase1.statement.z[i]));
+    phi.push_back(g1mul(pp.L, rexp.statement.z[i]));
     theta.push_back(g2mul(pp.Lprime, tensor[i]));
   }
   Target aggregate{gtpow(pre.pairing_LLprime, q),
-                   pairing(pp.L, phase1.statement.X),
-                   pairing(phase1.R, pp.Lprime)};
+                   pairing(pp.L, rexp.statement.X),
+                   pairing(rexp.R, pp.Lprime)};
 
   for (std::size_t t = 1; t <= pp.log_dimension; ++t) {
     const std::size_t k = t - 1, m = pp.dimension >> k, half = m / 2;
@@ -458,7 +431,7 @@ VmeProof prove_phase2(const VmePublicParams& pp, const VmePrecomputation& pre,
         gtpow(pre.pairing_x[k + 1], fmul(alpha_inv, beta_inv)),
         gtpow(pre.delta2R[k], beta_inv)});
 
-    const auto& fresh = phase1.fresh[t];
+    const auto& fresh = rexp.fresh[t];
     const GT U = gtmul(pairing_product(folded_phi, fresh.theta),
                        pairing_product(fresh.phi, folded_theta));
     proof.batch_U.push_back(U);
@@ -961,6 +934,52 @@ bool verify_deferred(const VmePublicParams& pp, const VmePrecomputation& pre,
   }
 }
 
+struct TerminalRelation {
+  GT nonpair;
+  G1 dory_g1;
+  Group dory_g2;
+};
+
+TerminalRelation assemble_terminal_relation(
+    const VmePublicParams& pp, const VmePrecomputation& pre,
+    const VmeProof& proof, const Replay& replay_state) {
+  const Scalar epsilon_inv = finv(replay_state.epsilon);
+  return {
+      product({replay_state.aggregate.D0,
+               gtpow(replay_state.aggregate.D1, epsilon_inv),
+               gtpow(replay_state.aggregate.D2, replay_state.epsilon),
+               pre.pairing_x[pp.log_dimension]}),
+      g1add(proof.phi_final,
+            g1mul(pp.auxiliary_G[0], replay_state.epsilon)),
+      g2add(proof.theta_final,
+            g2mul(pp.fixed_P[0], epsilon_inv))};
+}
+
+bool verify_terminal_reference(const VmePublicParams& pp,
+                               const VmeProof& proof,
+                               const Replay& replay_state,
+                               const TerminalRelation& terminal) {
+  return terminal.nonpair == pairing(terminal.dory_g1, terminal.dory_g2) &&
+         pairing(proof.R, pp.fixed_P[0]) == replay_state.outer;
+}
+
+bool verify_terminal_optimized(const VmePublicParams& pp,
+                               const VmeProof& proof, Replay& replay_state,
+                               const TerminalRelation& terminal) {
+  const Scalar eta = replay_state.transcript.challenge(
+      "BPVME/HP/VME/COMBINE-ETA/v1", pp.log_dimension);
+  const GT gt_part =
+      gtmul(terminal.nonpair, gtpow(gtinv(replay_state.outer), eta));
+  Scalar minus_one;
+  minus_one = -1;
+  std::array<G1, 2> left{g1mul(terminal.dory_g1, minus_one),
+                         g1mul(proof.R, eta)};
+  std::array<Group, 2> right{terminal.dory_g2, pp.fixed_P[0]};
+  GT one;
+  one.setOne();
+  return gtmul(gt_part, pairing_product(left, right)) == one;
+}
+
 bool verify_common(const VmePublicParams& pp, const VmePrecomputation& pre,
                    const Digest& context, const Group& X,
                    std::span<const Scalar> z, const VmeProof& proof,
@@ -976,35 +995,11 @@ bool verify_common(const VmePublicParams& pp, const VmePrecomputation& pre,
     Replay replay_state(statement.digest);
     if (!replay(pp, pre, statement, proof, replay_state, stats)) return false;
     const auto terminal_start = Clock::now();
-    const Scalar epsilon_inv = finv(replay_state.epsilon);
-    const GT nonpair = product({replay_state.aggregate.D0,
-        gtpow(replay_state.aggregate.D1, epsilon_inv),
-        gtpow(replay_state.aggregate.D2, replay_state.epsilon),
-        pre.pairing_x[pp.log_dimension]});
-    const G1 terminal_g1 =
-        g1add(proof.phi_final, g1mul(pp.auxiliary_G[0], replay_state.epsilon));
-    const Group terminal_g2 =
-        g2add(proof.theta_final, g2mul(pp.fixed_P[0], epsilon_inv));
-    bool accepted = false;
-    if (!optimized) {
-      const GT dory_pair = pairing(terminal_g1, terminal_g2);
-      const GT rexp_pair = pairing(proof.R, pp.fixed_P[0]);
-      accepted = nonpair == dory_pair && rexp_pair == replay_state.outer;
-    } else {
-      const Scalar eta =
-          replay_state.transcript.challenge("BPVME/HP/VME/COMBINE-ETA/v1",
-                                            pp.log_dimension);
-      GT gt_part = gtmul(nonpair, gtpow(gtinv(replay_state.outer), eta));
-      Scalar minus_one;
-      minus_one = -1;
-      std::array<G1, 2> left{g1mul(terminal_g1, minus_one),
-                             g1mul(proof.R, eta)};
-      std::array<Group, 2> right{terminal_g2, pp.fixed_P[0]};
-      const GT paired = pairing_product(left, right);
-      GT combined = gtmul(gt_part, paired);
-      GT one; one.setOne();
-      accepted = combined == one;
-    }
+    const TerminalRelation terminal =
+        assemble_terminal_relation(pp, pre, proof, replay_state);
+    const bool accepted = optimized
+        ? verify_terminal_optimized(pp, proof, replay_state, terminal)
+        : verify_terminal_reference(pp, proof, replay_state, terminal);
     if (stats) {
       stats->terminal_ms += ms(terminal_start);
       stats->accepted = accepted;
@@ -1229,8 +1224,11 @@ VmeProof prove_vme(const VmePublicParams& pp, const VmePrecomputation& pre,
   if (!validate_vme_params(pp) || !validate_vme_precomputation_binding(pp, pre) ||
       z.size() != pp.dimension || !valid_g2(X))
     throw std::invalid_argument("invalid VME prove input");
-  const Phase1 phase1 = prove_phase1(pp, pre, context, X, z);
-  return prove_phase2(pp, pre, phase1);
+  const RexpPhaseOutput rexp = prove_rexp_phase(pp, pre, context, X, z);
+  VmeProof proof = prove_dory_phase(pp, pre, rexp);
+  if (!validate_vme_proof(pp, proof))
+    throw std::runtime_error("VME prover produced an invalid proof shape");
+  return proof;
 }
 
 bool verify_vme_reference(const VmePublicParams& pp,

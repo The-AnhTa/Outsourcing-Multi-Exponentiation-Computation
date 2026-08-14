@@ -2,6 +2,8 @@
 #include "hp_protocol_internal.hpp"
 #include "hp_transcript_internal.hpp"
 #include "hp_vme_internal.hpp"
+#include "internal/protocol_utils.hpp"
+#include "internal/protocol_validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,72 +22,25 @@ double milliseconds(Clock::time_point start) {
   return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
-Bytes u64be(std::uint64_t value) {
-  Bytes out;
-  for (int shift = 56; shift >= 0; shift -= 8)
-    out.push_back(static_cast<std::uint8_t>(value >> shift));
-  return out;
-}
+using internal::exact_log2;
+using internal::fadd;
+using internal::finv;
+using internal::fmul;
+using internal::fneg;
+using internal::frame;
+using internal::gadd;
+using internal::gmul;
+using internal::msm;
+using internal::power_of_two;
+using internal::u64be;
+using internal::valid_group;
 
 void raw(Bytes& out, std::span<const std::uint8_t> field) {
-  out.insert(out.end(), field.begin(), field.end());
+  internal::append_raw(out, field);
 }
 
-void frame(Bytes& out, std::span<const std::uint8_t> field) {
-  raw(out, u64be(field.size()));
-  raw(out, field);
-}
-
-void frame(Bytes& out, std::string_view field) {
-  frame(out, {reinterpret_cast<const std::uint8_t*>(field.data()), field.size()});
-}
-
-bool power_of_two(std::size_t n) { return n && !(n & (n - 1)); }
-
-std::size_t exact_log2(std::size_t n) {
-  if (!power_of_two(n)) throw std::invalid_argument("n must be a power of two");
-  std::size_t d = 0;
-  while (n > 1) { n >>= 1; ++d; }
-  return d;
-}
-
-Scalar fadd(const Scalar& a, const Scalar& b) {
-  Scalar out; Scalar::add(out, a, b); return out;
-}
-Scalar fmul(const Scalar& a, const Scalar& b) {
-  Scalar out; Scalar::mul(out, a, b); return out;
-}
-Scalar finv(const Scalar& a) {
-  if (a.isZero()) throw std::invalid_argument("zero scalar");
-  Scalar out; Scalar::inv(out, a); return out;
-}
-Scalar fneg(const Scalar& a) {
-  Scalar out; Scalar::neg(out, a); return out;
-}
-Group gadd(const Group& a, const Group& b) {
-  Group out; Group::add(out, a, b); return out;
-}
-Group gmul(const Group& p, const Scalar& x) {
-  Group out; Group::mul(out, p, x); return out;
-}
 Scalar inner(std::span<const Scalar> a, std::span<const Scalar> b) {
-  if (a.size() != b.size()) throw std::invalid_argument("inner length");
-  Scalar out; out.clear();
-  for (std::size_t i = 0; i < a.size(); ++i)
-    out = fadd(out, fmul(a[i], b[i]));
-  return out;
-}
-Group msm(std::span<const Group> points, std::span<const Scalar> scalars) {
-  if (points.size() != scalars.size()) throw std::invalid_argument("MSM length");
-  Group out; out.clear();
-  if (!points.empty()) {
-    std::vector<Group> work(points.begin(), points.end());
-    Group::mulVec(out, work.data(), scalars.data(), work.size());
-  }
-  return out;
-}
-bool valid_group(const Group& p, bool nonidentity = false) {
-  return p.isValid() && p.isValidOrder() && (!nonidentity || !p.isZero());
+  return internal::inner_product(a, b);
 }
 
 Group derive_g2(std::string_view domain, std::span<const std::uint8_t> seed,
@@ -146,23 +101,9 @@ Digest application_context(const HpPublicParams& pp, const Group& Z,
 bool fast_hp_binding(const HpPublicParams& pp, const Digest& precomp_crs,
                      const VmePrecomputation& precomp) {
   try {
-    if (!power_of_two(pp.bp.n) || pp.bp.d != exact_log2(pp.bp.n) ||
-        pp.bp.n > std::numeric_limits<std::size_t>::max() / 2 ||
-        pp.N != 2 * pp.bp.n || pp.vme.dimension != pp.N ||
-        pp.vme.log_dimension != pp.bp.d + 1 ||
-        pp.bp.G.size() != pp.bp.n || pp.bp.H.size() != pp.bp.n ||
-        pp.vme.auxiliary_G.size() != pp.N ||
-        pp.bp.transcript_domain != kHpTranscriptDomain ||
-        !pp.bp.transcript_crs_digest ||
-        *pp.bp.transcript_crs_digest != pp.crs_digest ||
-        precomp_crs != pp.crs_digest ||
-        pp.vme.fixed_P.size() != pp.N)
-      return false;
-    for (std::size_t i = 0; i < pp.bp.n; ++i)
-      if (pp.vme.fixed_P[i] != pp.bp.G[i] ||
-          pp.vme.fixed_P[pp.bp.n + i] != pp.bp.H[i])
-        return false;
-    return hp_crs_digest(pp) == pp.crs_digest &&
+    return internal::validate_hp_public_params_shape(pp) &&
+           precomp_crs == pp.crs_digest &&
+           hp_crs_digest(pp) == pp.crs_digest &&
            hp_internal::validate_vme_precomputation_binding(pp.vme, precomp);
   } catch (...) { return false; }
 }
@@ -170,7 +111,7 @@ bool fast_hp_binding(const HpPublicParams& pp, const Digest& precomp_crs,
 struct GeneratedRounds {
   std::vector<RoundMessage> rounds;
   std::vector<Scalar> alphas;
-  Scalar x0, y0;
+  Scalar x0, y0, gamma;
 };
 
 std::vector<Scalar> fold_scalars(std::span<const Scalar> left,
@@ -218,6 +159,7 @@ GeneratedRounds compute_rounds(const HpPublicParams& pp, const Group& Z,
     H = fold_groups(HL, HR, alpha_inv);
   }
   out.x0 = xv[0]; out.y0 = yv[0];
+  out.gamma = transcript.outer_gamma(out.x0, out.y0);
   return out;
 }
 
@@ -315,18 +257,13 @@ hp_internal::HpAggregate build_aggregate(
 }
 
 bool canonical_group(std::span<const std::uint8_t> bytes, Group& out) {
-  Group value;
-  if (bytes.size() != group_bytes() ||
-      value.deserialize(bytes.data(), bytes.size()) != bytes.size() ||
-      !valid_group(value) || serialize(value) != Bytes(bytes.begin(), bytes.end()))
-    return false;
-  out = value;
-  return true;
+  return internal::canonical_group(bytes, out);
 }
 
 std::uint64_t read_u64(std::span<const std::uint8_t> bytes, std::size_t pos) {
   std::uint64_t out = 0;
-  for (std::size_t i = 0; i < 8; ++i) out = (out << 8) | bytes[pos + i];
+  if (!internal::read_u64(bytes, pos, out))
+    throw std::out_of_range("truncated u64");
   return out;
 }
 
@@ -391,16 +328,13 @@ HpProof prove_hp(const HpPublicParams& pp, const HpHelperPrecomp& pre,
   const auto rounds_start = Clock::now();
   const GeneratedRounds generated = compute_rounds(pp, Z, x, y);
   if (timings) timings->bp_round_generation_ms = milliseconds(rounds_start);
-  hp_internal::HpBpTranscript transcript(pp.bp, Z);
-  for (std::size_t i = 0; i < generated.rounds.size(); ++i)
-    (void)transcript.round(pp.bp.d - i, generated.rounds[i].A,
-                           generated.rounds[i].B);
-  const Scalar gamma = transcript.outer_gamma(generated.x0, generated.y0);
   const auto aggregate_start = Clock::now();
   const auto aggregate = build_aggregate(
-      pp, x, y, generated.rounds, generated.alphas, gamma);
+      pp, x, y, generated.rounds, generated.alphas, generated.gamma);
+  if (aggregate.x0 != generated.x0 || aggregate.y0 != generated.y0)
+    throw std::runtime_error("HP aggregation terminal mismatch");
   const Digest context = application_context(
-      pp, Z, generated.rounds, aggregate.x0, aggregate.y0, gamma,
+      pp, Z, generated.rounds, aggregate.x0, aggregate.y0, generated.gamma,
       aggregate.z_gamma);
   if (timings) timings->outer_aggregation_ms = milliseconds(aggregate_start);
   const auto vme_start = Clock::now();
@@ -430,9 +364,9 @@ static std::optional<Proof> verify_hp_impl(
     }
     return std::nullopt;
   }
-  if (!proof_prevalidated)
-    for (const auto& round : helper.rounds)
-      if (!valid_group(round.A) || !valid_group(round.B)) return std::nullopt;
+  if (!proof_prevalidated &&
+      !internal::validate_hp_proof_shape(pp, helper))
+    return std::nullopt;
   if (pp.bp.d == 0) {
     if (helper.vme_proof) return std::nullopt;
     Proof result{{}, x[0], y[0]};
@@ -442,9 +376,7 @@ static std::optional<Proof> verify_hp_impl(
     }
     return result;
   }
-  if (!helper.vme_proof ||
-      (!proof_prevalidated &&
-       !hp_internal::validate_vme_proof(pp.vme, *helper.vme_proof)))
+  if (!helper.vme_proof)
     return std::nullopt;
   if (timings)
     timings->parse_and_validation_ms = milliseconds(validation_start);
@@ -523,7 +455,8 @@ std::optional<Proof> verify_hp_serialized(
 }
 
 HpInstance generate_hp_instance(const HpPublicParams& pp) {
-  if (!power_of_two(pp.bp.n)) throw std::invalid_argument("invalid HP parameters");
+  if (!internal::validate_hp_public_params_shape(pp))
+    throw std::invalid_argument("invalid HP parameters");
   HpInstance out;
   out.x.resize(pp.bp.n); out.y.resize(pp.bp.n);
   for (std::size_t i = 0; i < pp.bp.n; ++i) {
@@ -537,28 +470,40 @@ HpInstance generate_hp_instance(const HpPublicParams& pp) {
 std::size_t vme_proof_payload_bytes(std::size_t n) {
   const std::size_t d = exact_log2(n), D = d + 1;
   if (d == 0) return 0;
-  return (4 * (D - 1) + 7 * D) * hp_internal::gt_bytes() +
-         2 * hp_internal::g1_bytes() + group_bytes();
+  std::size_t rexp = 0, dory = 0, gt_count = 0, gt_total = 0;
+  std::size_t g1_total = 0, total = 0;
+  if (!internal::checked_mul(4, D - 1, rexp) ||
+      !internal::checked_mul(7, D, dory) ||
+      !internal::checked_add(rexp, dory, gt_count) ||
+      !internal::checked_mul(gt_count, hp_internal::gt_bytes(), gt_total) ||
+      !internal::checked_mul(2, hp_internal::g1_bytes(), g1_total) ||
+      !internal::checked_add(gt_total, g1_total, total) ||
+      !internal::checked_add(total, group_bytes(), total))
+    throw std::overflow_error("VME proof size overflow");
+  return total;
 }
 
 std::size_t hp_proof_payload_bytes(std::size_t n) {
   const std::size_t d = exact_log2(n);
-  return 2 * d * group_bytes() + (d == 0 ? 0 : vme_proof_payload_bytes(n));
+  std::size_t rounds = 0, total = 0;
+  if (!internal::checked_mul(d, 2, rounds) ||
+      !internal::checked_mul(rounds, group_bytes(), rounds) ||
+      !internal::checked_add(rounds,
+          d == 0 ? 0 : vme_proof_payload_bytes(n), total))
+    throw std::overflow_error("HP proof size overflow");
+  return total;
 }
 
 std::size_t hp_proof_wire_bytes(std::size_t n) {
-  return kHpHeader + hp_proof_payload_bytes(n);
+  std::size_t total = 0;
+  if (!internal::checked_add(kHpHeader, hp_proof_payload_bytes(n), total))
+    throw std::overflow_error("HP proof wire size overflow");
+  return total;
 }
 
 Bytes serialize_hp_proof(const HpPublicParams& pp, const HpProof& proof) {
-  if (proof.rounds.size() != pp.bp.d ||
-      (pp.bp.d == 0 ? proof.vme_proof.has_value() : !proof.vme_proof.has_value()))
-    throw std::invalid_argument("HP proof shape");
-  for (const auto& round : proof.rounds)
-    if (!valid_group(round.A) || !valid_group(round.B))
-      throw std::invalid_argument("invalid HP round element");
-  if (proof.vme_proof &&
-      !hp_internal::validate_vme_proof(pp.vme, *proof.vme_proof))
+  if (!internal::validate_hp_public_params_shape(pp) ||
+      !internal::validate_hp_proof_shape(pp, proof))
     throw std::invalid_argument("invalid VME proof");
   Bytes out;
   out.reserve(hp_proof_wire_bytes(pp.bp.n));
@@ -583,14 +528,18 @@ Bytes serialize_hp_proof(const HpPublicParams& pp, const HpProof& proof) {
     raw(out, hp_internal::serialize_g1(v.phi_final));
     raw(out, serialize(v.theta_final));
   }
+  if (out.size() != hp_proof_wire_bytes(pp.bp.n))
+    throw std::runtime_error("unexpected HP proof encoding size");
   return out;
 }
 
 bool deserialize_hp_proof(const HpPublicParams& pp,
                           std::span<const std::uint8_t> bytes,
                           HpProof& proof) noexcept {
+  proof = {};
   try {
-    if (bytes.size() != hp_proof_wire_bytes(pp.bp.n) ||
+    if (!internal::validate_hp_public_params_shape(pp) ||
+        bytes.size() != hp_proof_wire_bytes(pp.bp.n) ||
         !std::equal(kHpMagic.begin(), kHpMagic.end(), bytes.begin()) ||
         bytes[8] != static_cast<std::uint8_t>(kHpVersion >> 8) ||
         bytes[9] != static_cast<std::uint8_t>(kHpVersion) ||

@@ -1,9 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
-project(bp_ipa LANGUAGES CXX)
+project(bp_ipa VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+option(BP_BUILD_BENCHMARKS "Build BP protocol benchmark executables" ON)
+
+function(bp_enable_strict_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endfunction()
 
 include(FetchContent)
 if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -27,23 +37,38 @@ if(WIN32 AND TARGET mcl)
 endif()
 
 add_library(bp_ipa
+  src/internal/protocol_utils.cpp
+  src/internal/protocol_validation.cpp
+  src/internal/bp_transcript.cpp
   src/bp.cpp
   src/hp_transcript_internal.cpp
   src/hp_vme_internal.cpp
   src/helper_prover.cpp
   src/helper_verifier.cpp)
-target_include_directories(bp_ipa PUBLIC include)
+target_include_directories(bp_ipa PUBLIC include PRIVATE src)
 target_link_libraries(bp_ipa PUBLIC mcl::mcl_st)
 target_compile_features(bp_ipa PUBLIC cxx_std_20)
-if(MSVC)
-  target_compile_options(bp_ipa PRIVATE /W4 /permissive-)
-else()
-  target_compile_options(bp_ipa PRIVATE -Wall -Wextra -Wpedantic)
+bp_enable_strict_warnings(bp_ipa)
+
+if(BP_BUILD_BENCHMARKS)
+  add_executable(run_bp bench/run_bp.cpp)
+  target_link_libraries(run_bp PRIVATE bp_ipa)
+  bp_enable_strict_warnings(run_bp)
+
+  add_executable(run_helper_prover bench/run_helper_prover.cpp)
+  target_link_libraries(run_helper_prover PRIVATE bp_ipa)
+  bp_enable_strict_warnings(run_helper_prover)
+
+  add_executable(run_helper_verifier bench/run_helper_verifier.cpp)
+  target_link_libraries(run_helper_verifier PRIVATE bp_ipa)
+  bp_enable_strict_warnings(run_helper_verifier)
 endif()
 
-add_executable(run_bp bench/run_bp.cpp)
-target_link_libraries(run_bp PRIVATE bp_ipa)
-add_executable(run_helper_prover bench/run_helper_prover.cpp)
-target_link_libraries(run_helper_prover PRIVATE bp_ipa)
-add_executable(run_helper_verifier bench/run_helper_verifier.cpp)
-target_link_libraries(run_helper_verifier PRIVATE bp_ipa)
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(bp_tests tests/bp_tests.cpp)
+  target_include_directories(bp_tests PRIVATE src)
+  target_link_libraries(bp_tests PRIVATE bp_ipa)
+  bp_enable_strict_warnings(bp_tests)
+  add_test(NAME bp_tests COMMAND bp_tests)
+endif()

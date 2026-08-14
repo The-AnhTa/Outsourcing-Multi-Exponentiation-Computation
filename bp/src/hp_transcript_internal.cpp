@@ -1,4 +1,5 @@
 #include "hp_transcript_internal.hpp"
+#include "internal/protocol_utils.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -12,25 +13,8 @@ constexpr Digest kRejectionLimit = {
     0xfd,0xbd,0x00,0x00,0x00,0x00,0x00,0x63,
     0xc6,0x00,0x00,0x00,0x00,0x00,0x00,0x4e};
 
-Bytes u64be(std::uint64_t value) {
-  Bytes out;
-  for (int shift = 56; shift >= 0; shift -= 8)
-    out.push_back(static_cast<std::uint8_t>(value >> shift));
-  return out;
-}
-
-void raw(Bytes& out, std::span<const std::uint8_t> field) {
-  out.insert(out.end(), field.begin(), field.end());
-}
-
-void frame(Bytes& out, std::span<const std::uint8_t> field) {
-  raw(out, u64be(field.size()));
-  raw(out, field);
-}
-
-void frame(Bytes& out, std::string_view field) {
-  frame(out, {reinterpret_cast<const std::uint8_t*>(field.data()), field.size()});
-}
+using bp::internal::frame;
+using bp::internal::u64be;
 
 }
 

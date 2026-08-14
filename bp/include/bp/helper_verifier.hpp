@@ -4,6 +4,8 @@
 
 namespace bp {
 
+namespace internal { struct HvPreparedStatementCacheAccess; }
+
 inline constexpr const char* kHvContextDomain = "BPVME/HV/CONTEXT/v1";
 inline constexpr const char* kHvVmeDomain = "BPVME/HV/VME/G2/v1";
 
@@ -44,12 +46,25 @@ struct HvStatement {
 
 struct HvProof { VmeProof vme_proof; };
 
-struct HvPreparedStatementCache {
-  bool ready{};
-  Digest crs_digest{};
-  Digest statement_context{};
-  std::vector<Scalar> z_v;
-  Group X0;
+class HvPreparedStatementCache {
+ public:
+  bool ready() const noexcept { return ready_; }
+  void clear() noexcept {
+    ready_ = false;
+    crs_digest_ = {};
+    statement_context_ = {};
+    z_v_.clear();
+    X0_.clear();
+  }
+
+ private:
+  bool ready_{};
+  Digest crs_digest_{};
+  Digest statement_context_{};
+  std::vector<Scalar> z_v_;
+  Group X0_;
+
+  friend struct internal::HvPreparedStatementCacheAccess;
 };
 
 struct HvInstance {
