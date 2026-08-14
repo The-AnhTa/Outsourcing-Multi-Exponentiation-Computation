@@ -27,6 +27,7 @@ struct Phase1Result {
   std::vector<RexpClaims> dynamic_claims;
   std::vector<FreshDoryInstance> fresh;
   G1 R;
+  Digest transcript_start{};
   Digest transcript_after_R{};
 };
 struct DoryTargetState { GT D0, D1, D2; };
