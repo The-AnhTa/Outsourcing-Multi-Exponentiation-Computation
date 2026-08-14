@@ -1,3 +1,9 @@
+[CmdletBinding()]
+param(
+    [ValidateRange(0, 3600)]
+    [int]$DelaySeconds = 0
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -13,6 +19,8 @@ foreach ($d in $dimensions) {
     foreach ($k in $instanceCounts) {
         Write-Output "d=$d k=$k"
         & $runner --d $d --k $k
-        Start-Sleep -Seconds 10
+        if ($DelaySeconds -gt 0) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
     }
 }

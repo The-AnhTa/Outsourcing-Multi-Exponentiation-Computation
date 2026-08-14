@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(multi_instance_pippenger LANGUAGES CXX)
+project(multi_instance_pippenger VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,28 +28,56 @@ if(WIN32 AND TARGET mcl)
   set_target_properties(mcl PROPERTIES OUTPUT_NAME mcl_shared)
 endif()
 
-add_library(pippenger src/pippenger.cpp)
-target_include_directories(pippenger PUBLIC include)
+add_library(pippenger
+  src/initialization.cpp
+  src/pippenger.cpp
+  src/pippenger_core.cpp
+  src/pippenger_validation.cpp)
+target_include_directories(pippenger PUBLIC include PRIVATE src)
 target_link_libraries(pippenger PUBLIC mcl::mcl_st)
+target_compile_features(pippenger PUBLIC cxx_std_20)
 
-add_executable(run_pippenger run_pippenger.cpp)
+add_executable(run_pippenger bench/run_pippenger.cpp)
 target_link_libraries(run_pippenger PRIVATE pippenger)
 
-add_library(pinkas src/pinkas.cpp)
-target_include_directories(pinkas PUBLIC include)
+add_library(pinkas
+  src/pinkas_validation.cpp
+  src/protocol.cpp
+  src/protocol_math.cpp
+  src/prover.cpp
+  src/serialization.cpp
+  src/transcript.cpp
+  src/verifier.cpp)
+target_include_directories(pinkas PUBLIC include PRIVATE src)
 target_link_libraries(pinkas PUBLIC pippenger)
+target_compile_features(pinkas PUBLIC cxx_std_20)
 
-add_executable(run_pinkas run_pinkas.cpp)
+add_executable(run_pinkas bench/run_pinkas.cpp)
 target_link_libraries(run_pinkas PRIVATE pinkas)
 
-if(MSVC)
-  target_compile_options(pippenger PRIVATE /W4 /permissive-)
-  target_compile_options(run_pippenger PRIVATE /W4 /permissive-)
-  target_compile_options(pinkas PRIVATE /W4 /permissive-)
-  target_compile_options(run_pinkas PRIVATE /W4 /permissive-)
-else()
-  target_compile_options(pippenger PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(run_pippenger PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(pinkas PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(run_pinkas PRIVATE -Wall -Wextra -Wpedantic)
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(pippenger_tests tests/pippenger_tests.cpp)
+  target_include_directories(pippenger_tests PRIVATE src)
+  target_link_libraries(pippenger_tests PRIVATE pinkas)
+endif()
+
+function(enable_strict_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endfunction()
+
+enable_strict_warnings(pippenger)
+enable_strict_warnings(run_pippenger)
+enable_strict_warnings(pinkas)
+enable_strict_warnings(run_pinkas)
+if(BUILD_TESTING)
+  enable_strict_warnings(pippenger_tests)
+endif()
+
+if(BUILD_TESTING)
+  add_test(NAME pippenger_tests COMMAND pippenger_tests)
 endif()
