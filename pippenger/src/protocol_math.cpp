@@ -45,4 +45,4 @@ std::size_t ceil_log2(std::size_t value) {
   return result;
 }
 
-}  // namespace pinkas::internal
+}  

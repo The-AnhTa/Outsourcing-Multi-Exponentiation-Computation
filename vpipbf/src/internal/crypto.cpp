@@ -38,4 +38,4 @@ bool valid_gt(const GT& value) {
     }
 }
 
-} // namespace vpip_bf::internal
+} 

@@ -27,4 +27,4 @@ Group derive_bp_generator(std::string_view domain,
                           std::span<const std::uint8_t> seed,
                           std::uint64_t index, bool indexed);
 
-}  // namespace bp::internal
+}  

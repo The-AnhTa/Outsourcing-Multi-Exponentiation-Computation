@@ -27,4 +27,4 @@ struct DoryTranscriptReplay {
 DoryTranscriptReplay replay_dory_transcript(
     const DoryCRS& crs, const DoryProof& proof, Digest transcript);
 
-} // namespace rexp::internal
+} 

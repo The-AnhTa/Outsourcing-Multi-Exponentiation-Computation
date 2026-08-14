@@ -63,7 +63,7 @@ bool validate_rexp_proof_gt(
     return true;
 }
 
-} // namespace internal
+} 
 
 bool IsValidGTSubgroup(const GT& value) {
     return mcl::bn::isValidGT(value);
@@ -93,4 +93,4 @@ ValidatedRexpProof ValidateRexpProof(
     return result;
 }
 
-} // namespace rexp
+} 

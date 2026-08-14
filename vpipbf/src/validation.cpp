@@ -137,4 +137,4 @@ bool validate_proof_elements(const VpipBfProof& proof) {
     return true;
 }
 
-} // namespace vpip_bf
+} 

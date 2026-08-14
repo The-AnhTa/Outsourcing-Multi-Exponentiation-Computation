@@ -99,7 +99,7 @@ Scalar hash_to_challenge(
   return result;
 }
 
-}  // namespace
+}  
 
 std::vector<std::vector<Scalar>> derive_challenges(
     const PublicParameters& parameters,
@@ -116,4 +116,4 @@ std::vector<std::vector<Scalar>> derive_challenges(
   return challenges;
 }
 
-}  // namespace pinkas::internal
+}  

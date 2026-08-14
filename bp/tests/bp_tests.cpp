@@ -270,7 +270,7 @@ void test_helper_verifier() {
         "HV cache was reused for a different statement");
 }
 
-}  // namespace
+}  
 
 int main() {
   try {

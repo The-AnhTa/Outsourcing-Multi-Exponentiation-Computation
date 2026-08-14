@@ -38,4 +38,4 @@ bool replay_protocol(const VmeIbfCRS&, const VmeIbfPrecomputation&,
                      const VmeIbfStatement&, const VmeIbfProof&,
                      ProtocolChallenges&);
 
-} // namespace vme_ibf::internal
+} 

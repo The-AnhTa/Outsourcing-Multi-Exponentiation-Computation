@@ -18,15 +18,15 @@ struct RawRexpStatement {
     std::vector<G1> H;
 };
 
-// Retained for source compatibility. New code should use PreparedStatement.
+
 struct LegacyRexpStatement {
     std::vector<G1> H;
     GT D1Initial, E0, F0, TL0, TR0;
     Digest digest{};
 };
 
-// Retained for source compatibility. New code should use
-// PreparedPublicParameters.
+
+
 struct LegacyRexpPrecomputation {
     std::vector<GT> X, Delta1R, Delta2R;
     Digest crsDigest{};
@@ -92,4 +92,4 @@ struct RexpSetupResult {
     RexpProverInput proverInput;
 };
 
-} // namespace rexp
+} 

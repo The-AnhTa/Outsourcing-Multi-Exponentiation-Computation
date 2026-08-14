@@ -34,4 +34,4 @@ inline bool rexp_proof_shape(
     return true;
 }
 
-} // namespace rexp::internal
+} 

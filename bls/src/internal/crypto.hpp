@@ -40,4 +40,4 @@ bool valid(const G1& point, bool require_nonidentity = false) noexcept;
 bool valid(const G2& point, bool require_nonidentity = false) noexcept;
 bool valid(const GT& value) noexcept;
 
-}  // namespace blsagg::internal
+}  

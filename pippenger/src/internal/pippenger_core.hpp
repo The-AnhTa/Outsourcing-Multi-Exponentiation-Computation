@@ -31,4 +31,4 @@ Group evaluate_pippenger_row(
     std::size_t window_count,
     std::size_t bucket_count);
 
-}  // namespace pippenger::internal
+}  

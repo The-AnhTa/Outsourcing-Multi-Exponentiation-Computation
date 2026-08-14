@@ -46,4 +46,4 @@ std::vector<std::vector<Scalar>> derive_challenges(
     const Digest& transcript,
     std::size_t instances);
 
-}  // namespace pinkas::internal
+}  

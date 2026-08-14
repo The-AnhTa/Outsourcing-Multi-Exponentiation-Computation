@@ -15,7 +15,7 @@ GT product(std::initializer_list<GT> values) {
     return result;
 }
 
-} // namespace
+} 
 
 ReferenceVerificationTrace verify_reference_diagnostic(
     const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
@@ -125,4 +125,4 @@ bool verify_reference(const VmeIbfCRS& crs,
         crs, precomputation, statement, proof).accepted;
 }
 
-} // namespace vme_ibf
+} 

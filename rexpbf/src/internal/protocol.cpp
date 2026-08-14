@@ -34,4 +34,4 @@ Fr derive_initial_rho(Transcript& transcript, const CRS& crs) {
     return transcript.challenge_nonzero_fr("REXP-BF-G1-RHO-V1", 0);
 }
 
-} // namespace rexpbf::internal
+} 

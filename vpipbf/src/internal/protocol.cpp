@@ -17,4 +17,4 @@ void absorb_rexp_claim(Transcript& transcript, std::size_t round,
         serialize(claim.TL), serialize(claim.TR)};
     transcript.absorb("vpipbf/rexp-message/v1", fields);
 }
-} // namespace vpip_bf::internal
+} 

@@ -52,4 +52,4 @@ SymbolicExpressions build_symbolic_expressions(
     std::span<const Fr> alpha_inverses,
     SymbolicMetrics* metrics);
 
-} // namespace rexpbf::internal
+} 

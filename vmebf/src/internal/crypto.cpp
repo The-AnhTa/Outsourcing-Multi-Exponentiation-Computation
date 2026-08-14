@@ -56,4 +56,4 @@ double milliseconds(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-} // namespace vme_ibf::internal
+} 

@@ -344,7 +344,7 @@ void test_size_baselines() {
     }
 }
 
-} // namespace
+} 
 
 int main() {
     try {

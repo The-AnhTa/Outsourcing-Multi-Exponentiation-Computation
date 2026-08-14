@@ -56,4 +56,4 @@ inline pippenger::ScalarMatrix random_scalars(
   return scalars;
 }
 
-}  // namespace benchmark_utils
+}  

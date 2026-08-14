@@ -123,4 +123,4 @@ bool replay_protocol(const VmeIbfCRS& crs, const VmeIbfPrecomputation& p,
     return true;
 }
 
-} // namespace vme_ibf::internal
+} 

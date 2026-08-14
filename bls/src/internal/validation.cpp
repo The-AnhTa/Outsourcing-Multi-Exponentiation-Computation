@@ -12,8 +12,8 @@ namespace {
 
 struct BytesHash {
   std::size_t operator()(const Bytes& bytes) const noexcept {
-    // FNV-1a is sufficient here: this hash table is only an optimization for
-    // exact byte-vector equality, not a cryptographic commitment.
+    
+    
     std::size_t hash = sizeof(std::size_t) == 8
                            ? static_cast<std::size_t>(14695981039346656037ull)
                            : static_cast<std::size_t>(2166136261u);
@@ -53,7 +53,7 @@ bool precomputations_equal(const Precomputation& lhs,
          lhs.digest == rhs.digest;
 }
 
-}  // namespace
+}  
 
 Digest parameter_digest(const PublicParameters& parameters) {
   Bytes bytes;
@@ -202,4 +202,4 @@ bool valid_proof(const PublicParameters& parameters, const Proof& proof) {
   return true;
 }
 
-}  // namespace blsagg::internal
+}  

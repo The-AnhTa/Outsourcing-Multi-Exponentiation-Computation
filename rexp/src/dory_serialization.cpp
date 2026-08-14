@@ -79,4 +79,4 @@ ProofSizes MeasureProofSizes(
     return {payload, SerializeBatchProof(proof, d, batch_size).size()};
 }
 
-} // namespace rexp
+} 

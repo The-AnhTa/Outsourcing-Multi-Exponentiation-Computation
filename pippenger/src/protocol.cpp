@@ -24,4 +24,4 @@ PublicParameters setup(std::size_t msm_window_width) {
       msm_window_width};
 }
 
-}  // namespace pinkas
+}  

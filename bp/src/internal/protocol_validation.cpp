@@ -108,4 +108,4 @@ bool validate_hv_proof_shape(const HvPublicParams& pp,
              : hp_internal::validate_vme_proof(pp.vme, proof.vme_proof);
 }
 
-}  // namespace bp::internal
+}  

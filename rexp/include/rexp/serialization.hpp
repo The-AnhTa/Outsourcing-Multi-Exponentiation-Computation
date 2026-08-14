@@ -29,4 +29,4 @@ ValidatedRexpProof DeserializeValidatedRexpProofWire(
     const std::vector<std::uint8_t>&, std::size_t expected_d,
     RexpProofValidationMetrics* metrics = nullptr);
 
-} // namespace rexp
+} 

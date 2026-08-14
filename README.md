@@ -8,10 +8,19 @@ The code is intended for research and benchmarking.
 
 - CMake >= 3.20
 - Ninja
-- Visual Studio C++ Build Tools with the x64 compiler
+- Visual Studio C++ Build Tools with the x64 C++20 compiler
 
 The run scripts locate Visual Studio through `vswhere.exe`. During the first
 build, CMake downloads the pinned MCL v3.00 dependency.
+
+Each project includes regression tests. From the corresponding project folder,
+the refactored code can be built and tested with:
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
 ## Projects
 
@@ -44,10 +53,12 @@ Run the commands from the corresponding project folder.
 ```powershell
 cd bls
 .\run_bls.ps1 --d 10
+.\run_bls.ps1 --d 10 --mode augmented
 ```
 
-The script reports protocol verification time, proof size, CRS size, and
-direct aggregate-BLS verification time.
+The script supports `basic` (the default) and `augmented` aggregation modes. It
+reports the selected mode and dimension, proving and verification time, proof
+size, CRS size, and direct aggregate-BLS verification time.
 
 ### Bulletproof and helper protocols
 
@@ -59,7 +70,8 @@ cd bp
 ```
 
 `run_bp.ps1` reports verification time, prover time, proof size, and CRS size.
-The helper-prover and helper-verifier scripts report the outsourcer verification time, proof size, and CRS size.
+The helper-prover script reports prover time, while the helper-verifier script
+reports verification time. Both also report proof size and CRS size.
 
 ### Pippenger
 

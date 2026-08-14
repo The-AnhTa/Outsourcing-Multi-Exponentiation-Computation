@@ -136,4 +136,4 @@ CombinedVerificationTrace verify_online_with_trace(
     return trace;
 }
 
-} // namespace vpip_bf
+} 

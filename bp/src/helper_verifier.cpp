@@ -43,7 +43,7 @@ struct HvPreparedStatementCacheAccess {
   }
 };
 
-}  // namespace internal
+}  
 
 namespace {
 

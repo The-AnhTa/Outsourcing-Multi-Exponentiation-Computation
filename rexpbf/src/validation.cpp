@@ -163,4 +163,4 @@ std::optional<ValidatedVerificationInputs> validate_verification_inputs(
     }
 }
 
-} // namespace rexpbf
+} 

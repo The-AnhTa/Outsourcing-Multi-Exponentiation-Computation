@@ -300,7 +300,7 @@ void test_protocol(std::size_t d, AggregationMode mode) {
   }
 }
 
-}  // namespace
+}  
 
 int main() {
   try {

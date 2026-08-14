@@ -17,7 +17,7 @@ constexpr Digest kRejectionLimit = {
     0xfd,0xbd,0x00,0x00,0x00,0x00,0x00,0x63,
     0xc6,0x00,0x00,0x00,0x00,0x00,0x00,0x4e};
 
-}  // namespace
+}  
 
 Digest bp_transcript_parameter_digest(const PublicParams& pp) {
   Bytes input;
@@ -104,4 +104,4 @@ Group derive_bp_generator(std::string_view domain,
   }
 }
 
-}  // namespace bp::internal
+}  

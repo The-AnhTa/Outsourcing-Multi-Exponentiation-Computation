@@ -12,7 +12,7 @@ inline constexpr std::size_t kMaximumWindowWidth = 16;
 using CanonicalScalar =
     std::array<std::uint8_t, kCanonicalScalarBytes>;
 
-}  // namespace pippenger::internal
+}  
 
 namespace pinkas::internal {
 
@@ -24,4 +24,4 @@ inline constexpr std::size_t kDigestBytes = 32;
 using Digest = std::array<std::uint8_t, kDigestBytes>;
 using CanonicalScalar = pippenger::internal::CanonicalScalar;
 
-}  // namespace pinkas::internal
+}  

@@ -372,7 +372,7 @@ void test_verifier_equivalence_and_tampering() {
         check(inverses[i] == inverse_nonzero(scalars[i]),
               "batch inversion disagrees with reference");
 }
-} // namespace
+} 
 
 int main() {
     try {

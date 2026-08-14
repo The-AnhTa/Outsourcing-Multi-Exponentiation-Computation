@@ -100,9 +100,9 @@ void Reader::finish() const {
 }
 
 void Reader::requireFramedElementsFit(std::size_t count) const {
-    // Every framed element needs at least its eight-byte length prefix. This
-    // rejects impossible counts before reserve() can perform a large
-    // attacker-controlled allocation.
+    
+    
+    
     if (count > remaining() / 8) {
         throw std::invalid_argument("element count exceeds remaining wire data");
     }
@@ -195,4 +195,4 @@ GT gt_pow(const GT& value, const Fr& scalar) {
     return out;
 }
 
-} // namespace rexp::internal
+} 

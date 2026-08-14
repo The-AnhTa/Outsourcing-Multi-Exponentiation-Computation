@@ -301,7 +301,7 @@ void test_wire_allocation_bounds() {
         "impossible statement element count reached allocation");
 }
 
-} // namespace
+} 
 
 int main() {
     try {

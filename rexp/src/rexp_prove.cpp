@@ -77,4 +77,4 @@ RexpProof Prove(
     return proof;
 }
 
-} // namespace rexp
+} 

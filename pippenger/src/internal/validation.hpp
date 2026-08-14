@@ -10,7 +10,7 @@ void validate_msm_dimensions(
     const std::vector<Group>& bases,
     const ScalarMatrix& scalars);
 
-}  // namespace pippenger::internal
+}  
 
 namespace pinkas::internal {
 
@@ -33,4 +33,4 @@ bool valid_proof(
     const PublicParameters& parameters,
     const PinkasProof& proof);
 
-}  // namespace pinkas::internal
+}  

@@ -388,7 +388,7 @@ void test_wire_and_tampering() {
           "tampered proof was accepted");
 }
 
-} // namespace
+} 
 
 int main() {
     try {

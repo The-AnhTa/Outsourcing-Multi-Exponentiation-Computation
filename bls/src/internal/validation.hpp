@@ -21,4 +21,4 @@ bool valid_precomputation(const PublicParameters& parameters,
                           const Precomputation& precomputation);
 bool valid_proof(const PublicParameters& parameters, const Proof& proof);
 
-}  // namespace blsagg::internal
+}  

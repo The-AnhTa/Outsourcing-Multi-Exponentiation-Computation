@@ -29,4 +29,4 @@ struct RexpVerifyMetrics {
 #endif
 };
 
-} // namespace rexp
+} 

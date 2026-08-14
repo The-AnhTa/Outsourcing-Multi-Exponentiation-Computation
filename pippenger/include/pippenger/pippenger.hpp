@@ -32,4 +32,4 @@ std::vector<Group> naive_multi_exponentiation(
     const std::vector<Group>& bases,
     const ScalarMatrix& scalars);
 
-}  // namespace pippenger
+}  

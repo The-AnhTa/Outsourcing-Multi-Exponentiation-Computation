@@ -36,7 +36,7 @@ bool valid_inputs(const CRS& crs, const Precomputation& precomputation,
         && valid_proof(crs, proof);
 }
 
-} // namespace
+} 
 
 bool verify_reference(const CRS& crs, const Precomputation& p,
                       const Statement& s, const Proof& proof) {
@@ -108,4 +108,4 @@ bool verify_reference(const CRS& crs, const Precomputation& p,
     }
 }
 
-} // namespace rexpbf
+} 

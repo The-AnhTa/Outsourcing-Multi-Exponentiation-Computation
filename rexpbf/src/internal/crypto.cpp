@@ -53,4 +53,4 @@ GT gt_product(std::initializer_list<GT> values) {
     return result;
 }
 
-} // namespace rexpbf::internal
+} 

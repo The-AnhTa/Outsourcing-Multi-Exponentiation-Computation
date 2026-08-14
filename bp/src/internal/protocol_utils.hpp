@@ -38,4 +38,4 @@ bool canonical_scalar(std::span<const std::uint8_t> bytes, Scalar& out) noexcept
 bool canonical_group(std::span<const std::uint8_t> bytes, Group& out,
                      bool require_nonidentity = false) noexcept;
 
-}  // namespace bp::internal
+}  

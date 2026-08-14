@@ -56,7 +56,7 @@ bool verify_arithmetic(
   return true;
 }
 
-}  // namespace
+}  
 
 bool prepare_validated_inputs(
     const PublicParameters& parameters,
@@ -109,4 +109,4 @@ bool verify(
          verify_online_prevalidated(validated);
 }
 
-}  // namespace pinkas
+}  

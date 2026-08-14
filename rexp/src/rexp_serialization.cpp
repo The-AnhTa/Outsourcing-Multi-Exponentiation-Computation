@@ -247,13 +247,13 @@ ValidatedRexpProof DeserializeValidatedRexpProofWire(
     std::size_t d,
     RexpProofValidationMetrics* metrics) {
     RexpProof proof = DeserializeRexpProofWire(bytes, d, metrics);
-    // Deserialization has already performed shape, point, canonical encoding,
-    // and GT subgroup checks. Move the validated representation into its
-    // wrapper so large proofs are not copied.
+    
+    
+    
     ValidatedRexpProof result;
     result.proof_ = std::move(proof);
     result.d_ = d;
     return result;
 }
 
-} // namespace rexp
+} 

@@ -113,4 +113,4 @@ bool verify_serialized(
     const std::vector<Group>& outputs,
     std::span<const std::uint8_t> encoded_proof);
 
-}  // namespace pinkas
+}  

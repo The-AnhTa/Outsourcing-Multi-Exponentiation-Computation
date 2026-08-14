@@ -28,4 +28,4 @@ ValidatedRexpProof ValidateRexpProof(
     RexpProof&&, std::size_t d,
     RexpProofValidationMetrics* metrics = nullptr);
 
-} // namespace rexp
+} 

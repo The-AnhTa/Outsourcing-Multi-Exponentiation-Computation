@@ -261,8 +261,8 @@ void test_pinkas_round_trip() {
         "an invalid proof version was accepted");
 
   auto invalid_dimensions = encoded;
-  // Version frame occupies 8 length bytes plus 16 protocol bytes. The first
-  // dimension follows and is an eight-byte big-endian instance count.
+  
+  
   invalid_dimensions[31] = 0;
   check(pinkas::deserialize_proof_detailed(
             parameters, invalid_dimensions, rejected) ==
@@ -270,7 +270,7 @@ void test_pinkas_round_trip() {
         "zero proof instances were accepted");
 
   auto invalid_point = encoded;
-  // The first framed G2 encoding begins after the version and dimensions.
+  
   invalid_point[48] ^= 0xff;
   const auto invalid_point_error = pinkas::deserialize_proof_detailed(
       parameters, invalid_point, rejected);
@@ -292,7 +292,7 @@ void test_pinkas_round_trip() {
       "serialization accepted an invalid proof shape");
 }
 
-}  // namespace
+}  
 
 int main() {
   try {

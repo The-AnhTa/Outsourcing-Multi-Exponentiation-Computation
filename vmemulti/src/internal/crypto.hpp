@@ -16,4 +16,4 @@ bool valid_gt(const GT& value);
 using Clock = std::chrono::steady_clock;
 double milliseconds(Clock::time_point start, Clock::time_point end);
 
-} // namespace vme_ibf::internal
+} 

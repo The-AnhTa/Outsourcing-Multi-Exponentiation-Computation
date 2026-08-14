@@ -153,7 +153,7 @@ CombinedVerificationTrace evaluate_combined(
     return trace;
 }
 
-} // namespace
+} 
 
 DeferredVerificationTrace verify_deferred_with_trace(
     const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
@@ -207,4 +207,4 @@ bool verify_deferred_combined(
     return inputs && verify_online(*inputs);
 }
 
-} // namespace vme_ibf
+} 

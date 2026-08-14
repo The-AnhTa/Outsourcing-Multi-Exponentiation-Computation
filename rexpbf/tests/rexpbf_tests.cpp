@@ -352,7 +352,7 @@ void test_baseline_sizes() {
     }
 }
 
-} // namespace
+} 
 
 int main() {
     try {

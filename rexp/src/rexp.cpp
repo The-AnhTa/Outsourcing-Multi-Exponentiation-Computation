@@ -121,7 +121,7 @@ bool verify_core(
     }
 }
 
-} // namespace
+} 
 
 bool VerifyPrepared(
     const PreparedPublicParameters& params,
@@ -169,4 +169,4 @@ bool Verify(
     }
 }
 
-} // namespace rexp
+} 

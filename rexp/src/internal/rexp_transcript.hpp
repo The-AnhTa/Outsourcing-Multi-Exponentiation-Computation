@@ -30,4 +30,4 @@ Digest rexp_leave_dory(const Digest& transcript, std::size_t round);
 Digest rexp_absorb_final(const Digest& transcript, const G1& result);
 RexpRoundMessage rexp_initial_round_message(const PreparedStatement& statement);
 
-} // namespace rexp::internal
+} 

@@ -14,4 +14,4 @@ std::size_t scalar_bit_length() {
   return Scalar::getBitSize();
 }
 
-}  // namespace pippenger
+}  

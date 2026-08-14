@@ -8,4 +8,4 @@ RexpProof Prove(
     const PreparedPublicParameters&, const PreparedStatement&,
     const RexpProverInput&);
 
-} // namespace rexp
+} 

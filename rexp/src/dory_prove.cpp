@@ -111,7 +111,7 @@ FoldResult prove_from_transcript(
     return result;
 }
 
-} // namespace
+} 
 
 DoryProof Prove(
     const DoryCRS& crs,
@@ -233,4 +233,4 @@ DoryBatchChallenges DeriveBatchChallenges(
     return out;
 }
 
-} // namespace rexp
+} 

@@ -17,4 +17,4 @@ bool validate_hv_proof_shape(const HvPublicParams& pp,
                              const HvProof& proof,
                              bool batched_gt_validation) noexcept;
 
-}  // namespace bp::internal
+}  

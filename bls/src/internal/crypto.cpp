@@ -19,7 +19,7 @@ bool canonical(const Group& value) {
   }
 }
 
-}  // namespace
+}  
 
 void append_raw(Bytes& out, std::span<const std::uint8_t> value) {
   out.insert(out.end(), value.begin(), value.end());
@@ -140,4 +140,4 @@ bool valid(const GT& value) noexcept {
   return canonical(value) && mcl::bn::isValidGT(value);
 }
 
-}  // namespace blsagg::internal
+}  

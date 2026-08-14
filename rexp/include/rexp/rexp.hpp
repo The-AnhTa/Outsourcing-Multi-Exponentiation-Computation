@@ -1,6 +1,6 @@
 #pragma once
 
-// Compatibility umbrella for the complete public Rexp API.
+
 #include "rexp/metrics.hpp"
 #include "rexp/proof.hpp"
 #include "rexp/prove.hpp"

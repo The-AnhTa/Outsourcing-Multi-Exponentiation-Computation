@@ -101,4 +101,4 @@ Group evaluate_pippenger_row(
   return accumulator;
 }
 
-}  // namespace pippenger::internal
+}  

@@ -19,4 +19,4 @@ Group pippenger_msm(
 
 std::size_t ceil_log2(std::size_t value);
 
-}  // namespace pinkas::internal
+}  

@@ -20,4 +20,4 @@ void validate_msm_dimensions(
   }
 }
 
-}  // namespace pippenger::internal
+}  

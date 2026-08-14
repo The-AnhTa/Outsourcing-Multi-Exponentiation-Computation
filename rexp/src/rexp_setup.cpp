@@ -38,7 +38,7 @@ DoryPrecomputation make_level_precomputation(
     return result;
 }
 
-} // namespace
+} 
 
 RawRexpCRS GenerateRawCRS(std::size_t d, std::string_view seed) {
     const DoryCRS crs = GenerateDoryCRS(d, seed);
@@ -156,4 +156,4 @@ RexpSetupResult Setup(std::size_t d, std::string_view seed) {
     return result;
 }
 
-} // namespace rexp
+} 

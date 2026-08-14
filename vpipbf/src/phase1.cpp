@@ -138,4 +138,4 @@ std::vector<Fr> replay_rho(const VpipBfCRS& crs,
     return rho;
 }
 
-} // namespace vpip_bf
+} 

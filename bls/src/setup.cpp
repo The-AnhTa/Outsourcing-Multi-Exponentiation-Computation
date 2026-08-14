@@ -103,7 +103,7 @@ void build_initial_rexp_claims(const PublicParameters& parameters,
                    out.delta2R[0]};
 }
 
-}  // namespace
+}  
 
 SetupResult setup(std::size_t d, AggregationMode mode, std::string_view seed) {
   initialize();
@@ -124,4 +124,4 @@ Precomputation precompute(const PublicParameters& parameters) {
   return result;
 }
 
-}  // namespace blsagg
+}  

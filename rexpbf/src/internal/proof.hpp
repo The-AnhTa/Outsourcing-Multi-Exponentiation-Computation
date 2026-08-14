@@ -10,4 +10,4 @@ ChallengeTrace replay_challenges_prevalidated(
     const Proof& proof,
     TranscriptMetrics* metrics = nullptr);
 
-} // namespace rexpbf::internal
+} 

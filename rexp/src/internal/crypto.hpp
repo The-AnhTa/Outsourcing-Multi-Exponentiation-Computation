@@ -120,4 +120,4 @@ G2 g2_add(const G2& left, const G2& right);
 GT gt_mul(const GT& left, const GT& right);
 GT gt_pow(const GT& value, const Fr& scalar);
 
-} // namespace rexp::internal
+} 

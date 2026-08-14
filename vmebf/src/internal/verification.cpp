@@ -46,7 +46,7 @@ bool valid_proof(const VmeIbfCRS& crs, const VmeIbfProof& proof) {
     return true;
 }
 
-} // namespace
+} 
 
 bool validate_verification_objects(
     const VmeIbfCRS& crs, const VmeIbfPrecomputation& precomputation,
@@ -220,4 +220,4 @@ PairingInputs resolve_pairing_atom(
     throw std::logic_error("unknown pairing atom");
 }
 
-} // namespace vme_ibf::internal
+} 

@@ -43,7 +43,7 @@ class Reader {
   std::size_t position_ = 0;
 };
 
-}  // namespace
+}  
 
 Bytes serialize_proof(
     const PublicParameters& parameters,
@@ -164,4 +164,4 @@ bool verify_serialized(
          verify_online_prevalidated(validated);
 }
 
-}  // namespace pinkas
+}  

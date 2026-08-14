@@ -42,4 +42,4 @@ ProverResult prove(
   return {std::move(outputs), std::move(proof)};
 }
 
-}  // namespace pinkas
+}  

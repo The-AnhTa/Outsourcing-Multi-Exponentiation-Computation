@@ -79,7 +79,7 @@ ChallengeTrace replay_challenges_impl(
     return trace;
 }
 
-} // namespace
+} 
 
 ChallengeTrace replay_challenges(
     const CRS& crs,
@@ -105,7 +105,7 @@ ChallengeTrace replay_challenges_prevalidated(
     return replay_challenges_impl(crs, statement, proof, metrics);
 }
 
-} // namespace internal
+} 
 
 std::vector<std::uint8_t> serialize_proof_payload(const Proof& proof) {
     std::vector<std::uint8_t> result;
@@ -134,4 +134,4 @@ std::vector<std::uint8_t> serialize_proof_payload(const Proof& proof) {
     return result;
 }
 
-} // namespace rexpbf
+} 

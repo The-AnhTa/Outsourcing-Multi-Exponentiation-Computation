@@ -174,7 +174,7 @@ DoryInstanceState batch_instances(const DoryInstanceState& folded,
     return result;
 }
 
-} // namespace
+} 
 
 Phase2Result prove_phase2(const VmeIbfCRS& crs,
                           const VmeIbfPrecomputation& precomputation,
@@ -262,4 +262,4 @@ Phase2Result prove_phase2(const VmeIbfCRS& crs,
     return result;
 }
 
-} // namespace vme_ibf
+} 

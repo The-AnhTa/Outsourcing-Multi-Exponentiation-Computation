@@ -22,7 +22,7 @@ bool valid_scalar_dimensions(
   return true;
 }
 
-}  // namespace
+}  
 
 bool valid_point(const Group& point) {
   return point.isValid() && point.isValidOrder();
@@ -84,4 +84,4 @@ bool valid_verification_inputs(
   return true;
 }
 
-}  // namespace pinkas::internal
+}  

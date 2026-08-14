@@ -11,4 +11,4 @@ PreparedStatement PrepareStatement(
     const PreparedPublicParameters&, const RawRexpStatement&);
 RexpSetupResult Setup(std::size_t d, std::string_view crs_seed);
 
-} // namespace rexp
+} 

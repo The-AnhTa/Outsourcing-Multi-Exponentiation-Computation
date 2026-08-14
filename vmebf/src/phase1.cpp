@@ -60,7 +60,7 @@ bool valid_claim(const RexpClaims& claim) {
         && internal::valid_gt(claim.TL) && internal::valid_gt(claim.TR);
 }
 
-} // namespace
+} 
 
 std::vector<Fr> tensor_vector(std::span<const Fr> challenges) {
     std::vector<Fr> weights(1);
@@ -173,4 +173,4 @@ std::vector<Fr> replay_rho(const VmeIbfCRS& crs,
     return rho;
 }
 
-} // namespace vme_ibf
+} 

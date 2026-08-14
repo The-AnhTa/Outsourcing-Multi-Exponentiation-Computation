@@ -30,4 +30,4 @@ GT gt_power(const GT& value, const Fr& scalar);
 GT gt_multiply(const GT& left, const GT& right);
 GT gt_product(std::initializer_list<GT> values);
 
-} // namespace rexpbf::internal
+} 

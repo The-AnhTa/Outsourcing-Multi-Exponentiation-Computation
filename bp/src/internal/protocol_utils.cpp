@@ -159,4 +159,4 @@ bool canonical_group(std::span<const std::uint8_t> bytes, Group& out,
   }
 }
 
-}  // namespace bp::internal
+}  

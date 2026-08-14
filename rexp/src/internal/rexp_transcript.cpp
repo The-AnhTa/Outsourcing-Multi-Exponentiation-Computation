@@ -108,4 +108,4 @@ RexpRoundMessage rexp_initial_round_message(
     return {statement.E0(), statement.F0(), statement.TL0(), statement.TR0()};
 }
 
-} // namespace rexp::internal
+} 

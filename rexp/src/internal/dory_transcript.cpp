@@ -131,8 +131,8 @@ bool digest_less_than_limit(const Digest& value) {
         value.begin(), value.end(), limit.begin(), limit.end());
 }
 
-} // namespace
-} // namespace internal
+} 
+} 
 
 Fr ChallengeNonzeroFr(
     const Digest& transcript_digest,
@@ -157,4 +157,4 @@ Fr ChallengeNonzeroFr(
     }
 }
 
-} // namespace rexp
+} 

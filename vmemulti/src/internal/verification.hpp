@@ -41,4 +41,4 @@ PairingInputs resolve_pairing_atom(PairingAtomId, const VmeIbfCRS&,
                                    const VmeIbfProof&,
                                    const VerificationEquations&);
 
-} // namespace vme_ibf::internal
+} 

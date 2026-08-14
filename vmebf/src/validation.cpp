@@ -16,7 +16,7 @@ Digest statement_digest(const VmeIbfCRS& crs, const VmeIbfStatement& statement) 
     return sha256(bytes);
 }
 
-} // namespace
+} 
 
 bool validate_crs_shape(const VmeIbfCRS& crs) {
     try {
@@ -103,4 +103,4 @@ bool validate_statement_digest(
     catch (...) { return false; }
 }
 
-} // namespace vme_ibf
+} 

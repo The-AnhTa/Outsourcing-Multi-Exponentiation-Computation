@@ -23,4 +23,4 @@ void append_round_metadata(
 
 Fr derive_initial_rho(Transcript& transcript, const CRS& crs);
 
-} // namespace rexpbf::internal
+} 
