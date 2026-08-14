@@ -107,7 +107,8 @@ int main(int argc, char** argv) {
               << "Direct pairing product time: " << direct_pairing_ms
               << " ms\n";
     return EXIT_SUCCESS;
-  } catch (...) {
+  } catch (const std::exception& error) {
+    std::cerr << "vpipbf benchmark error: " << error.what() << '\n';
     return EXIT_FAILURE;
   }
 }

@@ -20,8 +20,6 @@ struct OnlineTimingBreakdown {
 
 bool verify_reference(const VpipBfCRS&, const VpipBfPrecomputation&, const VpipBfStatement&, const VpipBfProof&);
 ReferenceVerificationTrace verify_reference_diagnostic(const VpipBfCRS&, const VpipBfPrecomputation&, const VpipBfStatement&, const VpipBfProof&);
-bool validate_verification_inputs(const VpipBfCRS&,const VpipBfPrecomputation&,const VpipBfStatement&,const VpipBfProof&);
-ReferenceVerificationTrace verify_core_unchecked(const VpipBfCRS&,const VpipBfPrecomputation&,const VpipBfStatement&,const VpipBfProof&,OnlineTimingBreakdown* = nullptr);
 void reset_verification_core_call_count_for_testing();
 std::size_t verification_core_call_count_for_testing();
 }

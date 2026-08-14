@@ -13,4 +13,6 @@ struct VpipBfProof {
 using Proof = VpipBfProof;
 
 VpipBfProof assemble_public_proof(const Phase1Result&, const Phase2Result&);
+bool validate_proof_shape(const VpipBfCRS&, const VpipBfProof&);
+bool validate_proof_elements(const VpipBfProof&);
 }

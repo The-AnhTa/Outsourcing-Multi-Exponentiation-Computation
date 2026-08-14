@@ -19,4 +19,17 @@ VpipBfPrecomputation precompute(const VpipBfCRS& crs);
 Digest compute_crs_digest(const VpipBfCRS& crs);
 Digest compute_precomputation_digest(const VpipBfCRS&, const VpipBfPrecomputation&);
 Digest compute_statement_input_digest(const VpipBfCRS&, std::span<const G1> X);
+bool validate_crs_shape(const VpipBfCRS&);
+bool validate_crs_elements(const VpipBfCRS&);
+bool validate_crs_digest(const VpipBfCRS&);
+bool validate_crs(const VpipBfCRS&);
+bool validate_precomputation_shape(const VpipBfCRS&,
+                                   const VpipBfPrecomputation&);
+bool validate_precomputation_elements(const VpipBfPrecomputation&);
+bool audit_precomputation(const VpipBfCRS&, const VpipBfPrecomputation&);
+bool validate_statement_input(const VpipBfCRS&,
+                              const VpipBfStatementInput&);
+bool validate_statement_shape(const VpipBfCRS&, const VpipBfStatement&);
+bool validate_statement_elements(const VpipBfStatement&);
+bool validate_statement_digest(const VpipBfCRS&, const VpipBfStatement&);
 }

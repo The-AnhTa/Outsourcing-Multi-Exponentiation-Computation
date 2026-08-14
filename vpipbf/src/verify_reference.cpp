@@ -1,13 +1,13 @@
 #include "vpip_bf/verify_reference.hpp"
+#include "internal/verification.hpp"
+#include "internal/protocol.hpp"
 #include "vpip_bf/serialization.hpp"
 #include "vpip_bf/setup.hpp"
 #include "vpip_bf/transcript.hpp"
 #include "vpip_bf/gt_multiexp.hpp"
-#include <mcl/gmp_util.hpp>
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <limits>
 
 namespace vpip_bf {
 namespace {
@@ -16,10 +16,6 @@ double elapsed(Clock::time_point a,Clock::time_point b){return std::chrono::dura
 std::atomic<std::size_t> core_calls{};
 Fr fm(const Fr&a,const Fr&b){Fr z;Fr::mul(z,a,b);return z;}
 GT prod(std::initializer_list<GT>x){GT z;z.setOne();for(const auto&q:x)z=gt_mul(z,q);return z;}
-template<class T>bool canonical(const T&x){try{auto b=serialize(x);T y;return y.deserialize(b.data(),b.size())==b.size()&&y==x;}catch(...){return false;}}
-bool valid_gt(const GT&x){if(!canonical(x))return false;mpz_class order;mcl::gmp::setStr(order,Fr::getModulo(),10);GT acc;GT::pow(acc,x,order);GT one;one.setOne();return acc==one;}
-Digest statement_digest(const VpipBfCRS&c,const Digest&id,std::span<const G1>X,const GT&C){Bytes b;append_frame(b,"vpipbf/statement/v1");append_frame(b,c.digest);append_frame(b,id);for(auto&x:X)append_frame(b,serialize(x));for(auto&x:c.H)append_frame(b,serialize(x));append_frame(b,serialize(c.Lprime));append_frame(b,serialize(C));return sha256(b);}
-void absorb_rexp(Transcript&T,size_t j,size_t m,const RexpClaims&r){std::array<Bytes,6>f{encode_u64_be(j),encode_u64_be(m),serialize(r.E),serialize(r.F),serialize(r.TL),serialize(r.TR)};T.absorb("vpipbf/rexp-message/v1",f);}
 }
 
 void reset_verification_core_call_count_for_testing(){core_calls=0;}
@@ -27,21 +23,10 @@ std::size_t verification_core_call_count_for_testing(){return core_calls.load();
 
 bool validate_verification_inputs(const VpipBfCRS&c,const VpipBfPrecomputation&p,const VpipBfStatement&s,const VpipBfProof&proof){
  try{
-  if(c.d<1||c.d>=std::numeric_limits<size_t>::digits||c.n!=(size_t{1}<<c.d)||c.G.size()!=c.n||c.H.size()!=c.n||s.X.size()!=c.n)return false;
-  if(p.pairing_x.size()!=c.d+1||p.delta1R.size()!=c.d||p.delta2R.size()!=c.d||proof.rexp_claims.size()!=c.d-1||proof.dory_folds.size()!=c.d||proof.batch_U.size()!=c.d)return false;
-  for(const auto&x:c.G)if(!valid_g1(x,true))return false;
-  for(const auto&x:c.H)if(!valid_g2(x,true))return false;
-  for(const auto&x:s.X)if(!valid_g1(x))return false;
-  if(!valid_g2(c.Lprime,true)||!valid_gt(s.C)||!valid_g1(proof.R)||!valid_g1(proof.PhiFinal)||!valid_g2(proof.ThetaFinal))return false;
-  for(const auto&x:p.pairing_x)if(!valid_gt(x))return false;
-  for(const auto&x:p.delta1R)if(!valid_gt(x))return false;
-  for(const auto&x:p.delta2R)if(!valid_gt(x))return false;
-  for(const auto&r:proof.rexp_claims)if(!valid_gt(r.E)||!valid_gt(r.F)||!valid_gt(r.TL)||!valid_gt(r.TR))return false;
-  for(const auto&f:proof.dory_folds)if(!valid_gt(f.D1L)||!valid_gt(f.D1R)||!valid_gt(f.D2L)||!valid_gt(f.D2R)||!valid_gt(f.W1)||!valid_gt(f.W2))return false;
-  for(const auto&u:proof.batch_U)if(!valid_gt(u))return false;
-  if(compute_crs_digest(c)!=c.digest||compute_precomputation_digest(c,p)!=p.digest)return false;
-  Digest id=compute_statement_input_digest(c,s.X);if(statement_digest(c,id,s.X,s.C)!=s.digest)return false;
-  return validate_precomputation(c,p);
+  return validate_crs(c)&&audit_precomputation(c,p)
+      &&validate_statement_shape(c,s)&&validate_statement_elements(s)
+      &&validate_statement_digest(c,s)&&validate_proof_shape(c,proof)
+      &&validate_proof_elements(proof);
  }catch(...){return false;}
 }
 
@@ -50,7 +35,7 @@ ReferenceVerificationTrace verify_core_unchecked(const VpipBfCRS&c,const VpipBfP
  try{
   auto q0=Clock::now();Transcript T(s.digest);auto q1=Clock::now();if(timing)timing->transcript_init_ms+=elapsed(q0,q1);
   tr.rho.resize(c.d);std::vector<DoryTargetState>fresh(c.d+1);GT outer=p.pairing_x[0];
-  for(size_t j=0;j<c.d;++j){RexpClaims msg=j==0?RexpClaims{p.delta1R[0],p.delta2R[0],p.pairing_x[1],p.delta1R[0]}:proof.rexp_claims[j-1];auto a=Clock::now();absorb_rexp(T,j,c.n>>j,msg);auto b=Clock::now();Fr rho=T.challenge_nonzero("vpipbf/challenge/rexp-r/v1",j);auto e=Clock::now();if(timing){timing->transcript_replay_ms+=elapsed(a,b);timing->challenge_derivation_ms+=elapsed(b,e);}Fr ri=inverse_nonzero(rho);tr.rho[j]=rho;size_t t=j+1;a=Clock::now();fresh[t].D0=prod({outer,gt_pow(msg.E,rho),gt_pow(msg.F,ri)});fresh[t].D1=gt_mul(msg.TL,gt_pow(msg.TR,rho));fresh[t].D2=gt_mul(p.pairing_x[t],gt_pow(p.delta2R[j],ri));outer=fresh[t].D1;b=Clock::now();if(timing)timing->gt_multiexp_ms+=elapsed(a,b);}
+  for(size_t j=0;j<c.d;++j){RexpClaims msg=internal::rexp_claim(j,p,proof.rexp_claims);auto a=Clock::now();internal::absorb_rexp_claim(T,j,c.n>>j,msg);auto b=Clock::now();Fr rho=T.challenge_nonzero("vpipbf/challenge/rexp-r/v1",j);auto e=Clock::now();if(timing){timing->transcript_replay_ms+=elapsed(a,b);timing->challenge_derivation_ms+=elapsed(b,e);}Fr ri=inverse_nonzero(rho);tr.rho[j]=rho;size_t t=j+1;a=Clock::now();fresh[t].D0=prod({outer,gt_pow(msg.E,rho),gt_pow(msg.F,ri)});fresh[t].D1=gt_mul(msg.TL,gt_pow(msg.TR,rho));fresh[t].D2=gt_mul(p.pairing_x[t],gt_pow(p.delta2R[j],ri));outer=fresh[t].D1;b=Clock::now();if(timing)timing->gt_multiexp_ms+=elapsed(a,b);}
   auto a=Clock::now();T.absorb("vpipbf/rexp-result-R/v1",serialize(proof.R));auto b=Clock::now();if(timing)timing->transcript_replay_ms+=elapsed(a,b);
   std::vector<Fr>r(c.d);for(size_t j=0;j<c.d;++j)r[c.d-j-1]=tr.rho[j];a=Clock::now();auto weights=tensor_vector(r);b=Clock::now();if(timing)timing->tensor_reconstruction_ms+=elapsed(a,b);if(weights.size()!=c.n)return {};
   a=Clock::now();G1 Y=g1_multiexp(s.X,weights);b=Clock::now();if(timing)timing->g1_msm_y_ms+=elapsed(a,b);
@@ -78,8 +63,8 @@ ReferenceVerificationTrace verify_core_symbolic_unchecked(const VpipBfCRS&c,cons
   auto q0=Clock::now();Transcript T(s.digest);auto q1=Clock::now();if(timing)timing->transcript_init_ms+=elapsed(q0,q1);
   tr.rho.resize(c.d);std::vector<DoryTargetState>fresh(c.d+1);GT outer=p.pairing_x[0];
   for(size_t j=0;j<c.d;++j){
-   RexpClaims msg=j==0?RexpClaims{p.delta1R[0],p.delta2R[0],p.pairing_x[1],p.delta1R[0]}:proof.rexp_claims[j-1];
-   auto a=Clock::now();absorb_rexp(T,j,c.n>>j,msg);auto b=Clock::now();Fr rho=T.challenge_nonzero("vpipbf/challenge/rexp-r/v1",j);auto e=Clock::now();
+   RexpClaims msg=internal::rexp_claim(j,p,proof.rexp_claims);
+   auto a=Clock::now();internal::absorb_rexp_claim(T,j,c.n>>j,msg);auto b=Clock::now();Fr rho=T.challenge_nonzero("vpipbf/challenge/rexp-r/v1",j);auto e=Clock::now();
    if(timing){timing->transcript_replay_ms+=elapsed(a,b);timing->challenge_derivation_ms+=elapsed(b,e);}Fr ri=inverse_nonzero(rho);tr.rho[j]=rho;size_t t=j+1;a=Clock::now();
    fresh[t].D0=prod({outer,gt_pow(msg.E,rho),gt_pow(msg.F,ri)});fresh[t].D1=gt_mul(msg.TL,gt_pow(msg.TR,rho));fresh[t].D2=gt_mul(p.pairing_x[t],gt_pow(p.delta2R[j],ri));outer=fresh[t].D1;
    b=Clock::now();if(timing)timing->gt_multiexp_ms+=elapsed(a,b);

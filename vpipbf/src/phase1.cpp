@@ -1,19 +1,141 @@
 #include "vpip_bf/phase1.hpp"
-#include <array>
+#include "internal/protocol.hpp"
+
 #include <stdexcept>
 
 namespace vpip_bf {
-std::vector<Fr> tensor_vector(std::span<const Fr>r){std::vector<Fr>w(1);w[0]=1;for(size_t jj=r.size();jj>0;--jj){const Fr&x=r[jj-1];std::vector<Fr>n;n.reserve(w.size()*2);for(auto&a:w){n.push_back(a);Fr q;Fr::mul(q,a,x);n.push_back(q);}w=std::move(n);}return w;}
-Digest compute_statement_digest(const VpipBfCRS&c,const VpipBfPrecomputation&,const VpipBfStatementInput&i,const GT&C){Bytes b;append_frame(b,"vpipbf/statement/v1");append_frame(b,c.digest);append_frame(b,i.digest);for(auto&x:i.X)append_frame(b,serialize(x));for(auto&x:c.H)append_frame(b,serialize(x));append_frame(b,serialize(c.Lprime));append_frame(b,serialize(C));return sha256(b);}
-namespace {
-void absorb_claim(Transcript&T,size_t j,size_t m,const RexpClaims&c){std::array<Bytes,6>f{encode_u64_be(j),encode_u64_be(m),serialize(c.E),serialize(c.F),serialize(c.TL),serialize(c.TR)};T.absorb("vpipbf/rexp-message/v1",f);}
-RexpClaims claims_for(size_t j,const VpipBfPrecomputation&p,std::span<const RexpClaims>dyn){if(j==0)return {p.delta1R[0],p.delta2R[0],p.pairing_x[1],p.delta1R[0]};return dyn[j-1];}
+
+std::vector<Fr> tensor_vector(std::span<const Fr> challenges) {
+    std::vector<Fr> weights(1);
+    weights[0] = 1;
+    for (std::size_t j = challenges.size(); j > 0; --j) {
+        const Fr& challenge = challenges[j - 1];
+        std::vector<Fr> next;
+        next.reserve(weights.size() * 2);
+        for (const auto& weight : weights) {
+            next.push_back(weight);
+            Fr scaled;
+            Fr::mul(scaled, weight, challenge);
+            next.push_back(scaled);
+        }
+        weights = std::move(next);
+    }
+    return weights;
 }
-Phase1Result prove_phase1(const VpipBfCRS&c,const VpipBfPrecomputation&p,const VpipBfStatementInput&i){
- if(c.d<1||c.n!=(size_t{1}<<c.d)||i.X.size()!=c.n||p.pairing_x.size()!=c.d+1||p.delta1R.size()!=c.d||p.delta2R.size()!=c.d)throw std::invalid_argument("malformed Phase-I input");
- Phase1Result o;o.statement.X=i.X;o.statement.C=pairing_product(i.X,c.H);o.statement.digest=compute_statement_digest(c,p,i,o.statement.C);Transcript T(o.statement.digest);o.rho.resize(c.d);o.fresh.resize(c.d+1);std::vector<G1>ac=c.G;GT outer=p.pairing_x[0];
- for(size_t j=0;j<c.d;++j){size_t m=c.n>>j,h=m/2,t=j+1;RexpClaims cl;if(j==0)cl=claims_for(0,p,{});else{cl.E=pairing_product(std::span(ac).subspan(h,h),std::span(c.H).first(h));cl.F=pairing_product(std::span(ac).first(h),std::span(c.H).subspan(h,h));cl.TL=pairing_product(std::span(ac).first(h),std::span(c.H).first(h));cl.TR=pairing_product(std::span(ac).subspan(h,h),std::span(c.H).first(h));o.dynamic_claims.push_back(cl);}absorb_claim(T,j,m,cl);Fr rho=T.challenge_nonzero("vpipbf/challenge/rexp-r/v1",j),ri=inverse_nonzero(rho);o.rho[j]=rho;std::vector<G1>an;std::vector<G2>theta;an.reserve(h);theta.reserve(h);for(size_t z=0;z<h;++z){an.push_back(g1_add(ac[z],g1_pow(ac[h+z],rho)));theta.push_back(g2_add(c.H[z],g2_pow(c.H[h+z],ri)));}auto&f=o.fresh[t];f.D0=gt_mul(gt_mul(outer,gt_pow(cl.E,rho)),gt_pow(cl.F,ri));f.D1=gt_mul(cl.TL,gt_pow(cl.TR,rho));f.D2=gt_mul(p.pairing_x[t],gt_pow(p.delta2R[j],ri));f.Phi=an;f.Theta=std::move(theta);ac=std::move(an);outer=f.D1;}
- o.R=ac.at(0);T.absorb("vpipbf/rexp-result-R/v1",serialize(o.R));o.transcript_after_R=T.digest();o.r.resize(c.d);for(size_t j=0;j<c.d;++j)o.r[c.d-j-1]=o.rho[j];return o;
+
+Digest compute_statement_digest(const VpipBfCRS& crs,
+                                const VpipBfPrecomputation&,
+                                const VpipBfStatementInput& input,
+                                const GT& commitment) {
+    Bytes bytes;
+    append_frame(bytes, "vpipbf/statement/v1");
+    append_frame(bytes, crs.digest);
+    append_frame(bytes, input.digest);
+    for (const auto& point : input.X) append_frame(bytes, serialize(point));
+    for (const auto& point : crs.H) append_frame(bytes, serialize(point));
+    append_frame(bytes, serialize(crs.Lprime));
+    append_frame(bytes, serialize(commitment));
+    return sha256(bytes);
 }
-std::vector<Fr> replay_rho(const VpipBfCRS&c,const VpipBfPrecomputation&p,const VpipBfStatement&s,std::span<const RexpClaims>dyn,const G1&R,Digest*after){if(dyn.size()!=c.d-1)throw std::invalid_argument("dynamic claim count");Transcript T(s.digest);std::vector<Fr>rho(c.d);for(size_t j=0;j<c.d;++j){auto cl=claims_for(j,p,dyn);absorb_claim(T,j,c.n>>j,cl);rho[j]=T.challenge_nonzero("vpipbf/challenge/rexp-r/v1",j);}T.absorb("vpipbf/rexp-result-R/v1",serialize(R));if(after)*after=T.digest();return rho;}
+
+Phase1Result prove_phase1(const VpipBfCRS& crs,
+                          const VpipBfPrecomputation& precomputation,
+                          const VpipBfStatementInput& input) {
+    if (!validate_crs(crs) || !audit_precomputation(crs, precomputation)
+        || !validate_statement_input(crs, input))
+        throw std::invalid_argument("malformed Phase-I input");
+
+    Phase1Result result;
+    result.statement.X = input.X;
+    result.statement.C = pairing_product(input.X, crs.H);
+    result.statement.digest = compute_statement_digest(
+        crs, precomputation, input, result.statement.C);
+    Transcript transcript(result.statement.digest);
+    result.transcript_start = transcript.digest();
+    result.rho.resize(crs.d);
+    result.fresh.resize(crs.d + 1);
+    std::vector<G1> folded_g = crs.G;
+    GT outer = precomputation.pairing_x[0];
+
+    for (std::size_t round = 0; round < crs.d; ++round) {
+        const std::size_t dimension = crs.n >> round;
+        const std::size_t half = dimension / 2;
+        const std::size_t level = round + 1;
+        RexpClaims claim;
+        if (round == 0) {
+            claim = internal::rexp_claim(0, precomputation, {});
+        } else {
+            claim.E = pairing_product(
+                std::span(folded_g).subspan(half, half),
+                std::span(crs.H).first(half));
+            claim.F = pairing_product(
+                std::span(folded_g).first(half),
+                std::span(crs.H).subspan(half, half));
+            claim.TL = pairing_product(
+                std::span(folded_g).first(half),
+                std::span(crs.H).first(half));
+            claim.TR = pairing_product(
+                std::span(folded_g).subspan(half, half),
+                std::span(crs.H).first(half));
+            result.dynamic_claims.push_back(claim);
+        }
+        internal::absorb_rexp_claim(
+            transcript, round, dimension, claim);
+        const Fr rho = transcript.challenge_nonzero(
+            "vpipbf/challenge/rexp-r/v1", round);
+        const Fr rho_inverse = inverse_nonzero(rho);
+        result.rho[round] = rho;
+
+        std::vector<G1> next_g;
+        std::vector<G2> theta;
+        next_g.reserve(half);
+        theta.reserve(half);
+        for (std::size_t i = 0; i < half; ++i) {
+            next_g.push_back(g1_add(
+                folded_g[i], g1_pow(folded_g[half + i], rho)));
+            theta.push_back(g2_add(
+                crs.H[i], g2_pow(crs.H[half + i], rho_inverse)));
+        }
+        auto& fresh = result.fresh[level];
+        fresh.D0 = gt_mul(gt_mul(outer, gt_pow(claim.E, rho)),
+                          gt_pow(claim.F, rho_inverse));
+        fresh.D1 = gt_mul(claim.TL, gt_pow(claim.TR, rho));
+        fresh.D2 = gt_mul(precomputation.pairing_x[level],
+                          gt_pow(precomputation.delta2R[round], rho_inverse));
+        fresh.Phi = next_g;
+        fresh.Theta = std::move(theta);
+        folded_g = std::move(next_g);
+        outer = fresh.D1;
+    }
+    result.R = folded_g.at(0);
+    transcript.absorb("vpipbf/rexp-result-R/v1", serialize(result.R));
+    result.transcript_after_R = transcript.digest();
+    result.r.resize(crs.d);
+    for (std::size_t round = 0; round < crs.d; ++round)
+        result.r[crs.d - round - 1] = result.rho[round];
+    return result;
 }
+
+std::vector<Fr> replay_rho(const VpipBfCRS& crs,
+                           const VpipBfPrecomputation& precomputation,
+                           const VpipBfStatement& statement,
+                           std::span<const RexpClaims> dynamic_claims,
+                           const G1& result_R, Digest* after_R) {
+    if (dynamic_claims.size() != crs.d - 1)
+        throw std::invalid_argument("dynamic claim count");
+    Transcript transcript(statement.digest);
+    std::vector<Fr> rho(crs.d);
+    for (std::size_t round = 0; round < crs.d; ++round) {
+        const auto claim = internal::rexp_claim(
+            round, precomputation, dynamic_claims);
+        internal::absorb_rexp_claim(
+            transcript, round, crs.n >> round, claim);
+        rho[round] = transcript.challenge_nonzero(
+            "vpipbf/challenge/rexp-r/v1", round);
+    }
+    transcript.absorb("vpipbf/rexp-result-R/v1", serialize(result_R));
+    if (after_R) *after_R = transcript.digest();
+    return rho;
+}
+
+} // namespace vpip_bf
