@@ -1,8 +1,7 @@
 ### Outsourcing Protocols for Group Multi-Exponentiation Computation
 
-This repository contains research prototype implementations of outsourcing
-protocols and algorithms for group multi-exponentiation computation.
-The code is intended for research and benchmarking. 
+This repository contains C++ research prototype implementations of outsourcing
+protocols for group multi-exponentiation computation.
 
 ## Requirements
 
@@ -13,8 +12,8 @@ The code is intended for research and benchmarking.
 The run scripts locate Visual Studio through `vswhere.exe`. During the first
 build, CMake downloads the pinned MCL v3.00 dependency.
 
-Each project includes regression tests. From the corresponding project folder,
-the refactored code can be built and tested with:
+From the corresponding project folder,
+the code can be built and tested with:
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
@@ -56,9 +55,8 @@ cd bls
 .\run_bls.ps1 --d 10 --mode augmented
 ```
 
-The script supports `basic` (the default) and `augmented` aggregation modes. It
-reports the selected mode and dimension, proving and verification time, proof
-size, CRS size, and direct aggregate-BLS verification time.
+It reports the selected mode and dimension, proving and verification time, proof
+size, CRS size, and direct aggregate BLS verification time.
 
 ### Bulletproof and helper protocols
 
@@ -80,7 +78,7 @@ cd pippenger
 .\run_pippenger.ps1 --d 10 --k 1
 ```
 
-Here, `k` is the number of instances. The script reports running time.
+`k` is the number of instances. The script reports running time.
 
 ### Pinkas
 
@@ -130,7 +128,7 @@ cd vmemulti
 .\run_vmemulti.ps1 --d 10 --m 4
 ```
 
-Here, `m` is the number of instances. The script reports verification time, proof size, and CRS size.
+`m` is the number of instances. The script reports verification time, proof size, and CRS size.
 
 ### Verifiable pairing inner product
 
